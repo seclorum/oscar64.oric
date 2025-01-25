@@ -2,7 +2,44 @@
 
 static IOCharMap		giocharmap = IOCHM_ASCII;
 
-#if defined(__C128__)
+#if defined(__ORIC__)
+__asm bsout
+{
+    ; Outputs a character from A to the screen
+    jsr $FDF0     ; Call the character output routine
+}
+__asm bsin
+{
+    ; Reads a character from the keyboard (blocking)
+    jsr $EC3E     ; Call the ROM routine for keyboard input
+    sta $FF01     ; Store the input character in $FF01
+}
+__asm bsget
+{
+    ; Gets a character from the keyboard buffer (non-blocking)
+    jsr $EC52     ; Call the ROM routine to check keyboard buffer
+    bcc .done     ; If no character, branch to done
+    lda ($02),y   ; Fetch the character from the buffer
+    sta $FF01     ; Store the character in $FF01
+.done:
+}
+__asm bsplot
+{
+    ; Plot a character on the screen at the current cursor position
+    jsr $FDF0     ; Use the same $FDF0 character output routine
+}
+__asm bsinit
+{
+    ; Initialize I/O system
+    jsr $E9E4     ; Call the ROM routine to initialize the system (RESET)
+}
+__asm dswap
+{
+    ; Swap current device (or similar operation)
+    ; Oric doesn't have device swapping like Commodore; implement as a NOP
+    nop           ; No operation
+}
+#elif defined(__C128__)
 #pragma code(lowcode)
 __asm bsout
 {	
