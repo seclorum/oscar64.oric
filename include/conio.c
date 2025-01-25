@@ -2,7 +2,37 @@
 
 static IOCharMap		giocharmap = IOCHM_ASCII;
 
-#if defined(__C128__)
+#if defined(__ORIC__)
+__asm bsout
+{
+    jsr 0xFDF0
+}
+__asm bsin
+{
+    jsr 0xEC3E
+    sta 0xFF01
+}
+__asm bsget
+{
+    jsr 0xEC52
+    bcc done
+    lda (0x02),y
+    sta 0xFF01
+done:
+}
+__asm bsplot
+{
+    jsr 0xFDF0
+}
+__asm bsinit
+{
+    jsr 0xE9E4
+}
+__asm dswap
+{
+    nop
+}
+#elif defined(__C128__)
 #pragma code(lowcode)
 __asm bsout
 {	
@@ -167,7 +197,7 @@ void dispmode80col(void)
 void iocharmap(IOCharMap chmap)
 {
 	giocharmap = chmap;	
-#if !defined(__ATARI__)
+#if !defined(__ATARI__) && !defined(__ORIC__)
 	if (chmap == IOCHM_PETSCII_1)
 		putrch(128 + 14);
 	else if (chmap == IOCHM_PETSCII_2)
