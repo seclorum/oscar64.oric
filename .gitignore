@@ -354,3 +354,9 @@ make/oscar64
 *.idb
 oscar64/Releasex64/oscar64.vcxproj.FileListAbsolute.txt
 /oscar64/Debugx64
+
+# CLion build directories created by cmake
+cmake-build-debug/**
+cmake-build-release/**
+# Hand-made build diectory when using cmake at cmd-line
+build/**

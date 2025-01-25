@@ -5,32 +5,32 @@ static IOCharMap		giocharmap = IOCHM_ASCII;
 #if defined(__ORIC__)
 __asm bsout
 {
-    jsr 0xFDF0
+		jsr 0xFDF0
 }
 __asm bsin
 {
-    jsr 0xEC3E
-    sta 0xFF01
+		jsr 0xEC3E
+		sta 0xFF01
 }
 __asm bsget
 {
-    jsr 0xEC52
-    bcc done
-    lda (0x02),y
-    sta 0xFF01
+		jsr 0xEC52
+		bcc done
+		lda (0x02),y
+		sta 0xFF01
 done:
 }
 __asm bsplot
 {
-    jsr 0xFDF0
+		jsr 0xFDF0
 }
 __asm bsinit
 {
-    jsr 0xE9E4
+		jsr 0xE9E4
 }
 __asm dswap
 {
-    nop
+		nop
 }
 #elif defined(__C128__)
 #pragma code(lowcode)
