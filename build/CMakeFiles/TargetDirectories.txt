@@ -1,4 +1,0 @@
-/Users/j/Documents/Development/retro/oscar64.oric/build/CMakeFiles/oscar64.dir
-/Users/j/Documents/Development/retro/oscar64.oric/build/CMakeFiles/format.dir
-/Users/j/Documents/Development/retro/oscar64.oric/build/CMakeFiles/edit_cache.dir
-/Users/j/Documents/Development/retro/oscar64.oric/build/CMakeFiles/rebuild_cache.dir
