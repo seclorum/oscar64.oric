@@ -272,6 +272,7 @@ public:
 
 //	void AddReference(const LinkerReference& ref);
 
+	bool WriteTapFile(const char *filename);
 	bool WritePrgFile(DiskImage * image, const char* filename);
 	bool WritePrgFile(const char* filename, const char * pathname);
 	bool WriteXexFile(const char* filename);

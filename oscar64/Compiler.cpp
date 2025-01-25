@@ -54,7 +54,24 @@ void Compiler::AddDefine(const Ident* ident, const char* value)
 
 bool Compiler::ParseSource(void)
 {
-	if (mTargetMachine == TMACH_ATARI)
+	if (mTargetMachine == TMACH_ORIC)
+	{
+		BC_REG_ACCU = 0x08; // use existing Oric indices for FACC
+		BC_REG_WORK_Y = 0x48; // Oric free work area (1 byte)
+		BC_REG_WORK = BC_REG_WORK_Y + 0x01;          // 0x48 + 0x01 = 0x49
+
+		BC_REG_TMP = BC_REG_WORK + 0x0A;             // 0x49 + 0x0A = 0x53
+		BC_REG_TMP_SAVED = BC_REG_TMP + 0x10;        // 0x53 + 0x10 = 0x63
+		BC_REG_LOCALS = BC_REG_TMP_SAVED + 0x10;     // 0x63 + 0x10 = 0x73
+
+		BC_REG_FPARAMS = BC_REG_LOCALS + 0x02;       // 0x73 + 0x02 = 0x75
+		BC_REG_FPARAMS_END = BC_REG_FPARAMS + 0x0A;  // 0x75 + 0x0A = 0x7F
+
+		BC_REG_IP = BC_REG_FPARAMS_END;              // 0x7F
+		BC_REG_ADDR = BC_REG_IP + 0x02;              // 0x7F + 0x02 = 0x81
+		BC_REG_STACK = BC_REG_ADDR + 0x04;           // 0x81 + 0x04 = 0x85
+	}
+	else if (mTargetMachine == TMACH_ATARI)
 	{
 		BC_REG_WORK_Y = 0x80;
 		BC_REG_WORK = 0x81;
@@ -504,7 +521,9 @@ bool Compiler::GenerateCode(void)
 	LinkerRegion* regionZeroPage = mLinker->FindRegion(identZeroPage);
 	if (!regionZeroPage)
 	{
-		if (mTargetMachine == TMACH_ATARI)
+		if (mTargetMachine == TMACH_ORIC)
+			regionZeroPage = mLinker->AddRegion(identZeroPage, 0x0080, 0x00FF);
+		else if (mTargetMachine == TMACH_ATARI)
 			regionZeroPage = mLinker->AddRegion(identZeroPage, 0x00e0, 0x00ff);
 		else if (mCompilerOptions & (COPT_EXTENDED_ZERO_PAGE | COPT_TARGET_NES))
 			regionZeroPage = mLinker->AddRegion(identZeroPage, 0x0080, 0x00ff);
@@ -1346,6 +1365,11 @@ bool Compiler::WriteOutputFile(const char* targetPath, DiskImage * d64)
 			printf("Writing <%s>\n", prgPath);
 		mLinker->WriteNesFile(prgPath, mTargetMachine);
 
+	} else if (mTargetMachine == TMACH_ORIC) {
+		strcat_s(prgPath, "tap");
+		if (mCompilerOptions & COPT_VERBOSE)
+			printf("Writing <%s>\n", prgPath);
+		mLinker->WriteTapFile(prgPath);
 	}
 
 

@@ -26,9 +26,6 @@ set_target_properties(oscar64 PROPERTIES
     CXX_EXTENSIONS NO
 )
 
-# Set debug and release configurations
-target_compile_definitions(oscar64 PRIVATE $<$<CONFIG:Debug>:_DEBUG;_CONSOLE> $<$<CONFIG:Release>:NDEBUG;_CONSOLE>)
-target_compile_options(oscar64 PRIVATE $<$<CONFIG:Debug>:/W3 /WX> $<$<CONFIG:Release>:/O2 /W3>)
 
 # Post-build steps (only for Release builds)
 if(CMAKE_BUILD_TYPE STREQUAL "Release")
@@ -37,9 +34,24 @@ if(CMAKE_BUILD_TYPE STREQUAL "Release")
     )
 endif()
 
+# Command to run gnu-indent
+add_custom_target(format
+        COMMAND indent --no-backup ${SOURCE_FILES}
+        WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+        COMMENT "Formatting source files with GNU Indent"
+)
+
 if (WIN32)
+    # Set debug and release configurations
+    target_compile_definitions(oscar64 PRIVATE $<$<CONFIG:Debug>:_DEBUG;_CONSOLE> $<$<CONFIG:Release>:NDEBUG;_CONSOLE>)
+    target_compile_options(oscar64 PRIVATE $<$<CONFIG:Debug>:/W3 /WX> $<$<CONFIG:Release>:/O2 /W3>)
+
     target_link_libraries(oscar64 PRIVATE kernel32 user32 gdi32 winspool comdlg32 advapi32 shell32 ole32 oleaut32 uuid odbc32 odbccp32 version)
 elseif (APPLE)
+    # Set debug and release configurations
+    target_compile_definitions(oscar64 PRIVATE $<$<CONFIG:Debug>:_DEBUG;_CONSOLE> $<$<CONFIG:Release>:NDEBUG;_CONSOLE>)
+    target_compile_options(oscar64 PRIVATE $<$<CONFIG:Debug>:-Wno-switch> $<$<CONFIG:Release>:>)
+
     # Add macOS-specific frameworks to replace Windows libraries
     target_link_libraries(${PROJECT_NAME} 
         "-framework Cocoa"        # For GUI and application support
@@ -49,8 +61,12 @@ elseif (APPLE)
         "-framework AppKit"        # For GUI (equivalent to user32)
     )
 elseif (UNIX)
+    # Set debug and release configurations
+    target_compile_definitions(oscar64 PRIVATE $<$<CONFIG:Debug>:_DEBUG;_CONSOLE> $<$<CONFIG:Release>:NDEBUG;_CONSOLE>)
+    target_compile_options(oscar64 PRIVATE $<$<CONFIG:Debug>:> $<$<CONFIG:Release>:>)
+
     # Add Linux-specific libraries for equivalent functionality
-    target_link_libraries(${PROJECT_NAME} 
+    target_link_libraries(${PROJECT_NAME}
         pthread                    # For threading (similar to kernel32)
         dl                         # For dynamic library loading (similar to LoadLibrary)
         m                          # For math library (optional but common on Linux)

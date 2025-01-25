@@ -474,6 +474,10 @@ int main2(int argc, const char** argv)
 		{
 			compiler->mTargetMachine = TMACH_ATARI;
 			compiler->AddDefine(Ident::Unique("__ATARI__"), "1");
+		} else if (!strcmp(targetMachine, "oric")) {
+			compiler->mTargetMachine = TMACH_ORIC;
+			strcpy_s(basicStart, "0x0501");
+			compiler->AddDefine(Ident::Unique("__ORIC__"), "1");
 		}
 		else
 			compiler->mErrors->Error(loc, EERR_COMMAND_LINE, "Invalid target machine option", targetMachine);

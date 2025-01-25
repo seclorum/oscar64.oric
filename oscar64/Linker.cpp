@@ -1390,6 +1390,59 @@ bool Linker::WritePrgFile(const char* filename, const char* pathname)
 	return false;
 }
 
+bool Linker::WriteTapFile(const char *filename) {
+	FILE *file;
+	fopen_s(&file, filename, "wb");
+	int i = 0;
+	char outchar;
+
+	if (file) {
+		// prefix
+		fputc(0x16, file);
+		fputc(0x16, file);
+		fputc(0x16, file);	// sync bytes
+
+		fputc(0x24, file);	// beginning-of-header marker
+
+		fputc(0x00, file);
+		fputc(0x00, file);
+
+		fputc(0x80, file);	// language flag, 0x00 = BASIC, 0x80 = Machine Code
+
+		fputc(0xC7, file);	// autorun flag, 0xC7 = run, 0x00 = load only
+
+		// address of end of file
+		fputc((mProgramEnd - 1) & 0xff, file);
+		fputc((mProgramEnd - 1) >> 8, file);
+
+		// address of start of file
+		fputc(mProgramStart & 0xff, file);
+		fputc(mProgramStart >> 8, file);
+
+		fputc(0x00, file);	// end of header
+
+		// file-name (max 17 chars, zero terminated)
+
+		// Write up to 16 characters from the filename or pad with '\0' if the filename is shorter
+		while (i < 16 && (outchar = filename[i]) != '\0') {
+			fputc(outchar, file);
+			i++;
+		}
+
+		// Pad with '\0' until we have written 17 characters in total
+		while (i < 17) {
+			fputc('\0', file);
+			i++;
+		}
+
+		ptrdiff_t done = fwrite(mMemory + mProgramStart, 1, mProgramEnd - mProgramStart, file);
+
+		fclose(file);
+		return true;
+	} else
+		return false;
+}
+
 static int memlzcomp(uint8 * dp, const uint8 * sp, int size)
 {
 	int	pos = 0, csize = 0;
