@@ -2,7 +2,7 @@
 
 static IOCharMap		giocharmap = IOCHM_ASCII;
 
-#if defined(__ORIC__)
+#if defined(__ATMOS__)
 __asm bsout
 {
 		jsr 0xFDF0
@@ -197,7 +197,7 @@ void dispmode80col(void)
 void iocharmap(IOCharMap chmap)
 {
 	giocharmap = chmap;	
-#if !defined(__ATARI__) && !defined(__ORIC__)
+#if !defined(__ATARI__) && !defined(__ATMOS__)
 	if (chmap == IOCHM_PETSCII_1)
 		putrch(128 + 14);
 	else if (chmap == IOCHM_PETSCII_2)

@@ -79,7 +79,7 @@ enum TargetMachine
 	TMACH_NES_MMC3,
 	TMACH_ATARI,
 	TMACH_X16,
-	TMACH_ORIC
+	TMACH_ATMOS
 };
 
 
