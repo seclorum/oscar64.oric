@@ -34,13 +34,6 @@ if(CMAKE_BUILD_TYPE STREQUAL "Release")
     )
 endif()
 
-# Command to run gnu-indent
-add_custom_target(format
-        COMMAND indent --no-backup ${SOURCE_FILES}
-        WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
-        COMMENT "Formatting source files with GNU Indent"
-)
-
 if (WIN32)
     # Set debug and release configurations
     target_compile_definitions(oscar64 PRIVATE $<$<CONFIG:Debug>:_DEBUG;_CONSOLE> $<$<CONFIG:Release>:NDEBUG;_CONSOLE>)
