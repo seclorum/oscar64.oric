@@ -56,20 +56,18 @@ bool Compiler::ParseSource(void)
 {
 	if (mTargetMachine == TMACH_ATMOS)
 	{
-		BC_REG_ACCU = 0x08; // use existing Oric indices for FACC
-		BC_REG_WORK_Y = 0x48; // Oric free work area (1 byte)
-		BC_REG_WORK = BC_REG_WORK_Y + 0x01;          // 0x48 + 0x01 = 0x49
-
-		BC_REG_TMP = BC_REG_WORK + 0x0A;             // 0x49 + 0x0A = 0x53
-		BC_REG_TMP_SAVED = BC_REG_TMP + 0x10;        // 0x53 + 0x10 = 0x63
-		BC_REG_LOCALS = BC_REG_TMP_SAVED + 0x10;     // 0x63 + 0x10 = 0x73
-
-		BC_REG_FPARAMS = BC_REG_LOCALS + 0x02;       // 0x73 + 0x02 = 0x75
-		BC_REG_FPARAMS_END = BC_REG_FPARAMS + 0x0A;  // 0x75 + 0x0A = 0x7F
-
-		BC_REG_IP = BC_REG_FPARAMS_END;              // 0x7F
-		BC_REG_ADDR = BC_REG_IP + 0x02;              // 0x7F + 0x02 = 0x81
-		BC_REG_STACK = BC_REG_ADDR + 0x04;           // 0x81 + 0x04 = 0x85
+		// Oric free work area (1 byte)
+		BC_REG_WORK_Y = 0x87;
+		BC_REG_WORK = 0x88;
+		BC_REG_FPARAMS = 0x92;
+		BC_REG_FPARAMS_END = 0x9e;
+		BC_REG_IP = 0x9e;
+		BC_REG_ACCU = 0xa2;
+		BC_REG_ADDR = 0xa6;
+		BC_REG_STACK = 0xaa;
+		BC_REG_LOCALS = 0xae;
+		BC_REG_TMP = 0xb2;
+		BC_REG_TMP_SAVED = 0xbc;
 	}
 	else if (mTargetMachine == TMACH_ATARI)
 	{
