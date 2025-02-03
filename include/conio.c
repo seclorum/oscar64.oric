@@ -5,20 +5,42 @@ static IOCharMap		giocharmap = IOCHM_ASCII;
 #if defined(__ATMOS__)
 __asm bsout
 {
-		jsr 0xFDF0
+_putchar:
+	ldy #0
+	lda (sp),y
+putchar:
+    cmp #0x0A
+    bne putchar2
+    pha
+    ldx #0x0D
+    jsr 0x0238
+    pla
+putchar2:
+    tax
+	jmp 0x0238
+ 
 }
+
 __asm bsin
 {
-		jsr 0xEC3E
-		sta 0xFF01
+_getchar:
+	jsr $023B
+	bpl _getchar
+	tax
+	jsr 0x0238
+	lda #0
+	rts
 }
+
 __asm bsget
 {
-		jsr 0xEC52
-		bcc done
-		lda (0x02),y
-		sta 0xFF01
-done:
+_getchar:
+	jsr $023B
+	bpl _getchar
+	tax
+	jsr 0x0238
+	lda #0
+	rts
 }
 __asm bsplot
 {
