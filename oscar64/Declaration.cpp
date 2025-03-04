@@ -497,12 +497,19 @@ Expression* Expression::ToAlternateThis(Declaration* pthis, Declaration* nthis)
 	Expression* right = mRight ? mRight->ToAlternateThis(pthis, nthis) : nullptr;
 	Declaration* decType = mDecType, * decValue = mDecValue;
 
-	if (decType == pthis->mBase)
-		decType = nthis->mBase;
-	else if (decType == pthis->mBase->mBase)
-		decType = nthis->mBase->mBase;
-	if (decValue == pthis)
-		decValue = nthis;
+	Declaration* lp = pthis, * np = nthis;
+	while (lp)
+	{
+		if (decType == lp->mBase)
+			decType = np->mBase;
+		else if (decType == lp->mBase->mBase)
+			decType = np->mBase->mBase;
+		if (decValue == lp)
+			decValue = np;
+
+		lp = lp->mNext;
+		np = np->mNext;
+	}
 
 	if (mType == EX_QUALIFY && mLeft->mDecType != left->mDecType)
 	{
@@ -649,6 +656,19 @@ Expression* Expression::ConstantFold(Errors * errors, LinkerSection * dataSectio
 
 		return this;
 	}
+	else if (mType == EX_PREFIX && mToken == TK_SIZEOF)
+	{
+		if (mLeft->mDecType->mFlags & DTF_DEFINED)
+		{
+			Expression* ex = new Expression(mLocation, EX_CONSTANT);
+			Declaration* dec = new Declaration(mLocation, DT_CONST_INTEGER);
+			dec->mBase = TheSignedIntTypeDeclaration;
+			dec->mInteger = mLeft->mDecType->mSize;
+			ex->mDecValue = dec;
+			ex->mDecType = dec->mBase;
+			return ex;
+		}
+	}
 	else if (mType == EX_PREFIX && mLeft->mType == EX_CONSTANT)
 	{
 
@@ -732,14 +752,29 @@ Expression* Expression::ConstantFold(Errors * errors, LinkerSection * dataSectio
 		ex->mDecType = mDecType;
 		return ex;
 	}
-	else if (mType == EX_PREFIX && mToken == TK_BINARY_AND && mLeft->mType == EX_INDEX && mLeft->mLeft->mType == EX_VARIABLE && (mLeft->mLeft->mDecValue->mFlags & (DTF_STATIC | DTF_GLOBAL)) && mLeft->mRight->mType == EX_CONSTANT)
+	else if (mType == EX_PREFIX && mToken == TK_BINARY_AND && mLeft->mType == EX_INDEX && 
+			 mLeft->mLeft->mType == EX_VARIABLE && mLeft->mLeft->mDecType->mType == DT_TYPE_ARRAY &&
+			 (mLeft->mLeft->mDecValue->mFlags & (DTF_STATIC | DTF_GLOBAL)) && mLeft->mRight->mType == EX_CONSTANT)
 	{
+		Declaration* vdec = mLeft->mLeft->mDecValue;
+
 		Expression* ex = new Expression(mLocation, EX_VARIABLE);
 		Declaration* dec = new Declaration(mLocation, DT_VARIABLE_REF);
-		dec->mFlags = mLeft->mLeft->mDecValue->mFlags;
-		dec->mBase = mLeft->mLeft->mDecValue;
-		dec->mSize = mLeft->mLeft->mDecType->mBase->mSize - int(mLeft->mRight->mDecValue->mInteger) * dec->mSize;
-		dec->mOffset = int(mLeft->mRight->mDecValue->mInteger) * dec->mSize;
+		
+		if (vdec->mType == DT_VARIABLE_REF)
+		{
+			dec->mFlags = vdec->mFlags;
+			dec->mBase = vdec->mBase;
+			dec->mSize = mLeft->mLeft->mDecType->mBase->mSize - int(mLeft->mRight->mDecValue->mInteger) * dec->mSize;
+			dec->mOffset = int(mLeft->mRight->mDecValue->mInteger) * dec->mSize + vdec->mOffset;
+		}
+		else
+		{
+			dec->mFlags = vdec->mFlags;
+			dec->mBase = vdec;
+			dec->mSize = mLeft->mLeft->mDecType->mBase->mSize - int(mLeft->mRight->mDecValue->mInteger) * dec->mSize;
+			dec->mOffset = int(mLeft->mRight->mDecValue->mInteger) * dec->mSize;
+		}
 		ex->mDecValue = dec;
 		ex->mDecType = mLeft->mLeft->mDecType;
 		return ex;
@@ -1280,7 +1315,7 @@ int Declaration::Stride(void) const
 {
 	if (mStride > 0)
 		return mStride;
-	else if (mBase)
+	else if (mBase && mBase->mType != DT_TYPE_VOID)
 		return mBase->mSize;
 	else
 		return 1;
@@ -2100,6 +2135,7 @@ Declaration* Declaration::Clone(void)
 	ndec->mOffset = mOffset;
 	ndec->mStride = mStride;
 	ndec->mStripe = mStripe;
+	ndec->mBits = mBits;
 	ndec->mBase = mBase;
 	ndec->mFlags = mFlags;
 	ndec->mScope = mScope;
@@ -2171,6 +2207,7 @@ Declaration* Declaration::ToStriped(int stripe)
 	ndec->mOffset = mOffset * stripe;
 	ndec->mStride = mStride;
 	ndec->mStripe = stripe;
+	ndec->mBits = mBits;
 	ndec->mFlags = mFlags;
 	ndec->mIdent = mIdent;
 	ndec->mQualIdent = mQualIdent;
@@ -2245,6 +2282,7 @@ Declaration* Declaration::ToVolatileType(void)
 		ndec->mSize = mSize;
 		ndec->mStride = mStride;
 		ndec->mBase = mBase;
+		ndec->mBits = mBits;
 		ndec->mFlags = mFlags | DTF_VOLATILE;
 		ndec->mScope = mScope;
 		ndec->mParams = mParams;
@@ -2300,6 +2338,7 @@ Declaration* Declaration::ToConstType(void)
 		ndec->mStride = mStride;
 		ndec->mStripe = mStripe;
 		ndec->mBase = mBase;
+		ndec->mBits = mBits;
 		ndec->mFlags = mFlags | DTF_CONST;
 		ndec->mScope = mScope;
 		ndec->mParams = mParams;
@@ -2336,16 +2375,17 @@ Declaration* Declaration::ToAlternateThis(Declaration* pthis, int nthis)
 	else
 	{
 		Declaration* nparam = ndec->mParams->Clone();
+		Declaration* npp = nparam;
+		Declaration* kpp = ndec->mParams->mNext;
+		while (kpp)
+		{
+			npp->mNext = kpp->Clone();
+			npp = npp->mNext;
+			kpp = npp->mNext;
+		}
 		nparam->mBase = pthis;
 		if (nthis == 2)
-		{
-			Declaration* nparam2 = ndec->mParams->mNext->Clone();
-			nparam2->mBase = pthis;
-			nparam->mNext = nparam2;
-			nparam2->mNext = ndec->mParams->mNext->mNext;
-		}
-		else
-			nparam->mNext = ndec->mParams->mNext;
+			nparam->mNext->mBase = pthis;
 		ndec->mParams = nparam;
 	}
 	return ndec;
@@ -2363,6 +2403,7 @@ Declaration* Declaration::ToMutableType(void)
 		ndec->mStride = mStride;
 		ndec->mStripe = mStripe;
 		ndec->mBase = mBase;
+		ndec->mBits = mBits;
 		ndec->mFlags = mFlags | DTF_CONST;
 		ndec->mScope = mScope;
 		ndec->mParams = mParams;
@@ -2987,9 +3028,11 @@ void InitDeclarations(void)
 {
 	static Location	noloc;
 	TheVoidTypeDeclaration = new Declaration(noloc, DT_TYPE_VOID);
+	TheVoidTypeDeclaration->mSize = 0;
 	TheVoidTypeDeclaration->mFlags = DTF_DEFINED;
 
 	TheConstVoidTypeDeclaration = new Declaration(noloc, DT_TYPE_VOID);
+	TheConstVoidTypeDeclaration->mSize = 0;
 	TheConstVoidTypeDeclaration->mFlags = DTF_DEFINED | DTF_CONST;
 
 	TheVoidPointerTypeDeclaration = new Declaration(noloc, DT_TYPE_POINTER);

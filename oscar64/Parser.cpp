@@ -4303,7 +4303,7 @@ Expression* Parser::AddFunctionCallRefReturned(Expression* exp)
 					if (pex->mDecValue->mType == DT_CONST_INTEGER || pex->mDecValue->mType == DT_CONST_FLOAT || pex->mDecValue->mType == DT_CONST_POINTER || pex->mDecValue->mType == DT_CONST_ADDRESS)
 					{
 						if (pdec->mType == DT_TYPE_REFERENCE && !(pdec->mBase->mFlags & DTF_CONST))
-							mErrors->Error(pex->mLocation, EERR_INCOMPATIBLE_TYPES, "Can't pass constant as non constante reference");
+							mErrors->Error(pex->mLocation, EERR_INCOMPATIBLE_TYPES, "Can't pass constant as non constant reference");
 
 						Declaration* vdec = AllocTempVar(pdec->mBase->mBase);
 
@@ -4328,6 +4328,9 @@ Expression* Parser::AddFunctionCallRefReturned(Expression* exp)
 				}
 				else if ((pdec->mBase->mType == DT_TYPE_REFERENCE && !pex->IsConstRef()) || (pdec->mBase->mType == DT_TYPE_RVALUEREF && !pex->IsLValue()))
 				{
+					if (pdec->mBase->mType == DT_TYPE_REFERENCE && !(pdec->mBase->mBase->mFlags & DTF_CONST))
+						mErrors->Error(pex->mLocation, EERR_NOT_AN_LVALUE, "Can't pass rvalue as non constant reference");
+					
 					Declaration* vdec = AllocTempVar(pex->mDecType);
 
 					Expression* vexp = new Expression(pex->mLocation, EX_VARIABLE);
@@ -4786,6 +4789,7 @@ Declaration* Parser::ParseDeclaration(Declaration * pdec, bool variable, bool ex
 
 			cdec->mFlags |= cdec->mBase->mFlags & (DTF_CONST | DTF_VOLATILE);
 			ctdec->mFlags |= storageFlags & (DTF_REQUEST_INLINE | DTF_CONSTEXPR | DTF_VIRTUAL);
+			cdec->mFlags |= storageFlags & (DTF_PREVENT_INLINE);
 
 			cdec->mSection = mCodeSection;
 			cdec->mBase->mFlags |= typeFlags;
@@ -4836,6 +4840,7 @@ Declaration* Parser::ParseDeclaration(Declaration * pdec, bool variable, bool ex
 
 			cdec->mFlags |= cdec->mBase->mFlags & (DTF_CONST | DTF_VOLATILE);
 			ctdec->mFlags |= storageFlags & (DTF_REQUEST_INLINE | DTF_CONSTEXPR | DTF_VIRTUAL);
+			cdec->mFlags |= storageFlags & (DTF_PREVENT_INLINE);
 
 			cdec->mSection = mCodeSection;
 			cdec->mBase->mFlags |= typeFlags;
@@ -4880,7 +4885,7 @@ Declaration* Parser::ParseDeclaration(Declaration * pdec, bool variable, bool ex
 			cdec->mBase = ctdec;
 
 			cdec->mFlags |= cdec->mBase->mFlags & (DTF_CONST | DTF_VOLATILE);
-			cdec->mFlags |= storageFlags & (DTF_INLINE | DTF_CONSTEXPR);
+			cdec->mFlags |= storageFlags & (DTF_INLINE | DTF_CONSTEXPR | DTF_PREVENT_INLINE);
 
 			cdec->mSection = mCodeSection;
 			cdec->mBase->mFlags |= typeFlags;
@@ -5409,7 +5414,10 @@ Declaration* Parser::ParseDeclaration(Declaration * pdec, bool variable, bool ex
 							ndec = pdec;
 						}
 						else if ((mCompilerOptions & COPT_CPLUSPLUS) || mScope->mLevel >= SLEVEL_FUNCTION)
+						{
 							mErrors->Error(ndec->mLocation, EERR_DUPLICATE_DEFINITION, "Duplicate variable declaration", ndec->mIdent);
+							mErrors->Error(pdec->mLocation, EINFO_ORIGINAL_DEFINITION, "Original definition");
+						}
 						else
 						{
 							if (!ndec->mBase->IsSame(pdec->mBase))
@@ -5421,7 +5429,11 @@ Declaration* Parser::ParseDeclaration(Declaration * pdec, bool variable, bool ex
 									pdec->mBase = ndec->mBase;
 								}
 								else
+								{
 									mErrors->Error(ndec->mLocation, EERR_DECLARATION_DIFFERS, "Variable declaration differs", ndec->mIdent);
+									mErrors->Error(pdec->mLocation, EINFO_ORIGINAL_DEFINITION, "Original definition");
+								}
+
 							}
 
 							pdec->mSection = ndec->mSection;
@@ -5429,7 +5441,10 @@ Declaration* Parser::ParseDeclaration(Declaration * pdec, bool variable, bool ex
 							pdec->mFlags |= ndec->mFlags & DTF_ZEROPAGE;
 
 							if (pdec->mValue)
+							{
 								mErrors->Error(ndec->mLocation, EERR_DUPLICATE_DEFINITION, "Duplicate variable declaration", ndec->mIdent);
+								mErrors->Error(pdec->mLocation, EINFO_ORIGINAL_DEFINITION, "Original definition");
+							}
 
 							ndec = pdec;
 
@@ -6775,6 +6790,10 @@ Expression* Parser::ParseSimpleExpression(bool lhs, bool tid)
 		dec = new Declaration(mScanner->mLocation, DT_CONST_INTEGER);
 		dec->mBase = TheSignedIntTypeDeclaration;
 
+		exp = new Expression(mScanner->mLocation, EX_CONSTANT);
+		exp->mDecValue = dec;
+		exp->mDecType = dec->mBase;
+
 		if (ConsumeTokenIf(TK_ELLIPSIS))
 		{
 			rexp = ParseParenthesisExpression();
@@ -6795,14 +6814,24 @@ Expression* Parser::ParseSimpleExpression(bool lhs, bool tid)
 		else
 		{
 			rexp = ParseParenthesisExpression();
+			Declaration* btype;
 			if (rexp->mDecType->IsReference())
-				dec->mInteger = rexp->mDecType->mBase->mSize;
+				btype = rexp->mDecType->mBase;
 			else
-				dec->mInteger = rexp->mDecType->mSize;
+				btype = rexp->mDecType;
+
+			if (btype->mFlags & DTF_DEFINED)
+				dec->mInteger = btype->mSize;
+			else
+			{
+				exp->mType = EX_PREFIX;
+				exp->mToken = TK_SIZEOF;
+				exp->mLeft = new Expression(mScanner->mLocation, EX_TYPE);
+				exp->mLeft->mDecType = btype;
+				exp->mLeft->mDecValue = nullptr;
+			}
 		}
-		exp = new Expression(mScanner->mLocation, EX_CONSTANT);
-		exp->mDecValue = dec;
-		exp->mDecType = dec->mBase;
+
 		break;
 
 	case TK_OPEN_PARENTHESIS:
@@ -8033,11 +8062,11 @@ Expression* Parser::ParsePostfixExpression(bool lhs)
 				}
 			}
 
-			if (exp->mDecType->mType == DT_TYPE_POINTER || exp->mDecType->mType == DT_TYPE_ARRAY)
+			if (exp->mDecType->NonRefBase()->mType == DT_TYPE_POINTER || exp->mDecType->NonRefBase()->mType == DT_TYPE_ARRAY)
 			{
 				Expression * dexp = new Expression(mScanner->mLocation, EX_PREFIX);
 				dexp->mToken = TK_MUL;
-				dexp->mDecType = exp->mDecType->mBase;
+				dexp->mDecType = exp->mDecType->NonRefBase()->mBase;
 				dexp->mLeft = exp;
 
 				exp = ParseQualify(dexp);
@@ -8521,7 +8550,7 @@ Expression* Parser::ParseMulExpression(bool lhs)
 
 		nexp->mRight = ParsePrefixExpression(false);
 
-		if (nexp->mLeft->mDecType->mType == DT_TYPE_FLOAT || nexp->mRight->mDecType->mType == DT_TYPE_FLOAT)
+		if (nexp->mLeft->mDecType->NonRefBase()->mType == DT_TYPE_FLOAT || nexp->mRight->mDecType->NonRefBase()->mType == DT_TYPE_FLOAT)
 			nexp->mDecType = TheFloatTypeDeclaration;
 		else
 			nexp->mDecType = exp->mDecType;
@@ -8736,9 +8765,27 @@ Expression* Parser::ParseAddExpression(bool lhs)
 
 		nexp->mRight = ParseMulExpression(false);
 		if (nexp->mLeft->mDecType->mType == DT_TYPE_POINTER && nexp->mRight->mDecType->IsIntegerType())
+		{
+			if (nexp->mLeft->mDecType->mBase->mType == DT_TYPE_VOID)
+			{
+				if (mCompilerOptions & COPT_CPLUSPLUS)
+					mErrors->Error(mScanner->mLocation, ERRR_INVALID_VOID_POINTER_ARITHMETIC, "Invalid arithmetic on void pointer");
+				else
+					mErrors->Error(mScanner->mLocation, EWARN_INVALID_VOID_POINTER_ARITHMETIC, "Invalid arithmetic on void pointer");				
+			}
 			nexp->mDecType = nexp->mLeft->mDecType;
+		}
 		else if (nexp->mRight->mDecType->mType == DT_TYPE_POINTER && nexp->mLeft->mDecType->IsIntegerType())
+		{
+			if (nexp->mRight->mDecType->mBase->mType == DT_TYPE_VOID)
+			{
+				if (mCompilerOptions & COPT_CPLUSPLUS)
+					mErrors->Error(mScanner->mLocation, ERRR_INVALID_VOID_POINTER_ARITHMETIC, "Invalid arithmetic on void pointer");
+				else
+					mErrors->Error(mScanner->mLocation, EWARN_INVALID_VOID_POINTER_ARITHMETIC, "Invalid arithmetic on void pointer");
+			}
 			nexp->mDecType = nexp->mRight->mDecType;
+		}
 		else if (nexp->mLeft->mDecType->mType == DT_TYPE_ARRAY && nexp->mRight->mDecType->IsIntegerType())
 		{
 			Declaration* dec = new Declaration(nexp->mLocation, DT_TYPE_POINTER);

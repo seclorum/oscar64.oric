@@ -72,7 +72,7 @@ InterCodeGenerator::ExValue InterCodeGenerator::Dereference(InterCodeProcedure* 
 		ins->mSrc[0].mStride = v.mReference == 1 ? v.mType->mStripe : 1;
 
 
-		if (v.mReference == 1 && v.mType->mType == DT_TYPE_ENUM)
+		if (v.mReference == 1 && v.mType->mType == DT_TYPE_ENUM && !v.mBits)
 		{
 			ins->mDst.mRange.LimitMin(v.mType->mMinValue);
 			ins->mDst.mRange.LimitMax(v.mType->mMaxValue);
@@ -128,6 +128,12 @@ InterCodeGenerator::ExValue InterCodeGenerator::Dereference(InterCodeProcedure* 
 			srins->mNumOperands = 2;
 			block->Append(srins);
 			
+			if (v.mType->mType == DT_TYPE_ENUM)
+			{
+				srins->mDst.mRange.LimitMin(v.mType->mMinValue);
+				srins->mDst.mRange.LimitMax(v.mType->mMaxValue);
+			}
+
 			// Promote unsigned bitfields that fit into a signed int to signed int
 			Declaration* vtype = v.mType;
 			if (vtype->mSize == 2 && v.mBits < 16 && !(vtype->mFlags & DTF_SIGNED))
@@ -3433,6 +3439,18 @@ InterCodeGenerator::ExValue InterCodeGenerator::TranslateExpression(Declaration*
 				mErrors->Error(exp->mLocation, ERRR_CANNOT_FIND_BANK_OF_EXPRESSION, "Cannot find bank of expressiohn");
 			}	break;
 
+			case TK_SIZEOF:
+			{
+				ins->mCode = IC_CONSTANT;
+				ins->mNumOperands = 0;
+				ins->mConst.mType = IT_INT16;
+				ins->mConst.mIntConst = exp->mLeft->mDecType->mSize;
+				ins->mDst.mType = IT_INT16;
+				ins->mDst.mTemp = proc->AddTemporary(ins->mDst.mType);
+				block->Append(ins);
+				return ExValue(TheUnsignedIntTypeDeclaration, ins->mDst.mTemp, vl.mReference - 1);
+			}
+
 			case TK_NEW:
 			{
 				ins->mCode = IC_MALLOC;
@@ -4160,7 +4178,9 @@ InterCodeGenerator::ExValue InterCodeGenerator::TranslateExpression(Declaration*
 							vr = CoerceType(proc, texp, block, inlineMapper, vr, pdec->mBase);
 						}
 						else if (pdec && (pdec->mBase->IsReference() && !vr.mType->IsReference()))
+						{
 							vr = Dereference(proc, texp, block, inlineMapper, vr, 1);
+						}
 						else if (vr.mType->IsReference() && !(pdec && pdec->mBase->IsReference()))
 						{
 							vr.mReference++;
@@ -5622,6 +5642,9 @@ InterCodeGenerator::ExValue InterCodeGenerator::TranslateExpression(Declaration*
 
 			return ExValue(TheVoidTypeDeclaration);
 		}
+		case EX_TYPE:
+			return ExValue(exp->mDecType);
+
 		default:
 			mErrors->Error(exp->mLocation, EERR_UNIMPLEMENTED, "Unimplemented expression");
 			return ExValue(TheVoidTypeDeclaration);

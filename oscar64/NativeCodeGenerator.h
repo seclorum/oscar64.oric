@@ -211,7 +211,7 @@ public:
 	bool IsShift(void) const;
 	bool IsShiftOrInc(void) const;
 	bool IsSimpleJSR(void) const;
-	bool MayBeMovedBefore(const NativeCodeInstruction& ins);
+	bool MayBeMovedBefore(const NativeCodeInstruction& ins) const;
 
 	bool ReplaceYRegWithXReg(void);
 	bool ReplaceXRegWithYReg(void);
@@ -341,6 +341,7 @@ public:
 	bool OptimizeSimpleLoopInvariant(NativeCodeProcedure* proc, NativeCodeBasicBlock * prevBlock, NativeCodeBasicBlock* exitBlock, bool full);
 	bool RemoveSimpleLoopUnusedIndex(void);
 	bool OptimizeLoopCarryOver(void);
+	bool OptimizeLoopRegisterWrapAround(void);
 
 	bool OptimizeSingleEntryLoopInvariant(NativeCodeProcedure* proc, NativeCodeBasicBlock* prev, NativeCodeBasicBlock* tail, ExpandingArray<NativeCodeBasicBlock*>& blocks);
 	bool OptimizeSingleEntryLoop(NativeCodeProcedure* proc);
@@ -422,6 +423,7 @@ public:
 	int ShortSignedDivide(InterCodeProcedure* proc, NativeCodeProcedure* nproc, const InterInstruction* ins, const InterInstruction* sins, int mul);
 
 	bool CheckPredAccuStore(int reg);
+	bool CheckIsInAccu(int reg);
 
 	NumberSet		mLocalRequiredRegs, mLocalProvidedRegs;
 	NumberSet		mEntryRequiredRegs, mEntryProvidedRegs;
@@ -443,7 +445,7 @@ public:
 	void CountEntries(NativeCodeBasicBlock* fromJump);
 	NativeCodeBasicBlock * ForwardAccuBranch(bool eq, bool ne, bool pl, bool mi, int limit);
 	bool MergeBasicBlocks(void);
-	void RemoveJumpToBranch(void);
+	bool RemoveJumpToBranch(void);
 
 	void MarkLoopHead(void);
 
@@ -573,6 +575,13 @@ public:
 	int FindFreeAccu(int at) const;
 
 	bool ReverseReplaceTAX(int at);
+	
+	bool CanReplaceExitAccuWithX(NativeCodeBasicBlock * target);
+	bool CanReplaceExitAccuWithY(NativeCodeBasicBlock* target);
+	void ReplaceExitAccuWithX(NativeCodeBasicBlock* target);
+	void ReplaceExitAccuWithY(NativeCodeBasicBlock* target);
+
+	bool ReverseLoadAccuToRegXY(void);
 
 	void ResetModifiedDataSet(NativeRegisterDataSet& data);
 
@@ -602,7 +611,12 @@ public:
 	bool HasTailSTY(int& addr, int& index) const;
 	bool HasTailSTAX16(int& addr, int& index0) const;
 
+	bool HasTailSTAInto(int& addr, int& index, NativeCodeBasicBlock* tblock) const;
+	bool HasTailSTXInto(int& addr, int& index, NativeCodeBasicBlock* tblock) const;
+	bool HasTailSTYInto(int& addr, int& index, NativeCodeBasicBlock* tblock) const;
+
 	bool MayBeMovedBeforeBlock(int at);
+	bool MayBeMovedBeforeBlock(int at, const NativeCodeInstruction & ins);
 	bool MayBeMovedBeforeBlock(int start, int end);
 	bool SafeInjectSequenceFromBack(NativeCodeBasicBlock* block, int start, int end);
 	bool JoinCommonBranchCodeSequences(void);
@@ -706,6 +720,8 @@ public:
 	bool EliminateDeadLoops(void);
 	bool LoopRegisterWrapAround(void);
 	bool CrossBlockFlagsForwarding(void);
+	bool MoveStoresBeforeDiamond(void);
+	bool MoveStoresBehindCondition(void);
 
 	bool SinglePathRegisterForwardY(NativeCodeBasicBlock* path, int yreg);
 	bool SinglePathRegisterForward(void);
@@ -740,6 +756,7 @@ public:
 	bool LocalSwapXY(void);
 	bool UntangleXYUsage(bool final);
 	bool AlternateXXUsage(void);
+	bool ShortSwapXY(void);
 
 	bool IsSimpleSubExpression(int at, NativeSimpleSubExpression & ex);
 	bool PropagateCommonSubExpression(void);
@@ -863,6 +880,7 @@ class NativeCodeProcedure
 		ExpandingArray<CodeLocation>		mCodeLocations;
 
 
+		void DisassembleDebug(const char* name);
 		void Disassemble(FILE* file);
 
 		void Compile(InterCodeProcedure* proc);
