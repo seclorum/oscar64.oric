@@ -1391,57 +1391,64 @@ bool Linker::WritePrgFile(const char* filename, const char* pathname)
 }
 
 bool Linker::WriteTapFile(const char *filename) {
-	FILE *file;
-	fopen_s(&file, filename, "wb");
-	int i = 0;
-	char outchar;
 
-	if (file) {
-		// prefix
-		fputc(0x16, file);
-		fputc(0x16, file);
-		fputc(0x16, file);	// sync bytes
+    FILE *file;
+    if (fopen_s(&file, filename, "wb") != 0 || !file) {
+        printf("Error: Could not open %s for writing\n", filename);
+        return false;
+    }
 
-		fputc(0x24, file);	// beginning-of-header marker
+    // TAP header for Oric Atmos
+    fputc(0x16, file); fputc(0x16, file); fputc(0x16, file); // Sync bytes
+    fputc(0x24, file);  // Header marker
+    fputc(0x00, file); fputc(0x01, file); // Version info (custom: 0x0100)
+    fputc(0x80, file);  // Machine code flag
+    fputc(0xC7, file);  // Autorun
 
-		fputc(0x00, file);
-		fputc(0x00, file);
+    // Program addresses
+    if (mProgramEnd <= mProgramStart) {
+        printf("Error: Invalid program size\n");
+        fclose(file);
+        return false;
+    }
+    fputc((mProgramEnd - 1) & 0xff, file);
+    fputc((mProgramEnd - 1) >> 8, file);
+    fputc(mProgramStart & 0xff, file);
+    fputc(mProgramStart >> 8, file);
+    fputc(0x00, file);  // End of header
 
-		fputc(0x80, file);	// language flag, 0x00 = BASIC, 0x80 = Machine Code
+    // Filename (max 16 chars + null)
+    int i = 0;
+    char outchar;
+    while (i < 16 && (outchar = filename[i]) != '\0') {
+        fputc(outchar, file);
+        i++;
+    }
+    while (i < 17) {
+        fputc('\0', file);
+        i++;
+    }
 
-		fputc(0xC7, file);	// autorun flag, 0xC7 = run, 0x00 = load only
+    // Write program data
+    ptrdiff_t size = mProgramEnd - mProgramStart;
+    ptrdiff_t done = fwrite(mMemory + mProgramStart, 1, size, file);
+    if (done != size) {
+        printf("Error: Incomplete write to %s (wrote %zd of %zd bytes)\n", filename, done, size);
+        fclose(file);
+        return false;
+    }
 
-		// address of end of file
-		fputc((mProgramEnd - 1) & 0xff, file);
-		fputc((mProgramEnd - 1) >> 8, file);
+    // Simple checksum (XOR of data bytes)
+    uint8_t checksum = 0;
+    for (ptrdiff_t j = 0; j < size; j++)
+        checksum ^= mMemory[mProgramStart + j];
+    fputc(checksum, file);
 
-		// address of start of file
-		fputc(mProgramStart & 0xff, file);
-		fputc(mProgramStart >> 8, file);
+    fclose(file);
 
-		fputc(0x00, file);	// end of header
-
-		// file-name (max 17 chars, zero terminated)
-
-		// Write up to 16 characters from the filename or pad with '\0' if the filename is shorter
-		while (i < 16 && (outchar = filename[i]) != '\0') {
-			fputc(outchar, file);
-			i++;
-		}
-
-		// Pad with '\0' until we have written 17 characters in total
-		while (i < 17) {
-			fputc('\0', file);
-			i++;
-		}
-
-		ptrdiff_t done = fwrite(mMemory + mProgramStart, 1, mProgramEnd - mProgramStart, file);
-
-		fclose(file);
-		return true;
-	} else
-		return false;
+    return true;
 }
+
 
 static int memlzcomp(uint8 * dp, const uint8 * sp, int size)
 {

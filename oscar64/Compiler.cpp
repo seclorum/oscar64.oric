@@ -51,23 +51,21 @@ void Compiler::AddDefine(const Ident* ident, const char* value)
 	mDefines.Push(define);
 }
 
-
 bool Compiler::ParseSource(void)
 {
 	if (mTargetMachine == TMACH_ATMOS)
 	{
-		// Oric free work area (1 byte)
-		BC_REG_WORK_Y = 0x87;
-		BC_REG_WORK = 0x88;
-		BC_REG_FPARAMS = 0x92;
-		BC_REG_FPARAMS_END = 0x9e;
-		BC_REG_IP = 0x9e;
-		BC_REG_ACCU = 0xa2;
-		BC_REG_ADDR = 0xa6;
-		BC_REG_STACK = 0xaa;
-		BC_REG_LOCALS = 0xae;
-		BC_REG_TMP = 0xb2;
-		BC_REG_TMP_SAVED = 0xbc;
+		BC_REG_WORK_Y = 0xc0;       // Y-index temp
+		BC_REG_WORK = 0xc1;         // General scratch
+		BC_REG_FPARAMS = 0xc2;      // Function params start
+		BC_REG_FPARAMS_END = 0xce;  // Params end
+		BC_REG_IP = 0xcf;           // Instruction pointer (no overlap)
+		BC_REG_ACCU = 0xd0;         // Accumulator
+		BC_REG_ADDR = 0xd2;         // Address register (2 bytes: 0xd2-0xd3)
+		BC_REG_STACK = 0xd4;        // Stack pointer (2 bytes: 0xd4-0xd5)
+		BC_REG_LOCALS = 0xd6;       // Local variables
+		BC_REG_TMP = 0xd8;          // Temp storage
+		BC_REG_TMP_SAVED = 0xda;    // Saved temp for interrupts
 	}
 	else if (mTargetMachine == TMACH_ATARI)
 	{
@@ -123,6 +121,7 @@ bool Compiler::ParseSource(void)
 	case TMACH_VIC20_3K:
 	case TMACH_VIC20_8K:
 	case TMACH_PET_8K:
+	case TMACH_ATMOS:
 		mCompilationUnits->mSectionStack->mSize = 512;
 		mCompilationUnits->mSectionHeap->mSize = 512;
 		break;
@@ -1369,7 +1368,6 @@ bool Compiler::WriteOutputFile(const char* targetPath, DiskImage * d64)
 			printf("Writing <%s>\n", prgPath);
 		mLinker->WriteTapFile(prgPath);
 	}
-
 
 	if (d64)
 	{

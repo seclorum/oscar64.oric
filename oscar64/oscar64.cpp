@@ -476,7 +476,7 @@ int main2(int argc, const char** argv)
 			compiler->AddDefine(Ident::Unique("__ATARI__"), "1");
 		} else if (!strcmp(targetMachine, "atmos")) {
 			compiler->mTargetMachine = TMACH_ATMOS;
-			strcpy_s(basicStart, "0x0501");
+			strcpy_s(basicStart, "0x1000"); // Machine code start, not BASIC
 			compiler->AddDefine(Ident::Unique("__ATMOS__"), "1");
 		}
 		else

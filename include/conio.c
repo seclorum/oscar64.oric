@@ -3,56 +3,70 @@
 static IOCharMap		giocharmap = IOCHM_ASCII;
 
 #if defined(__ATMOS__)
+#warning "ATMOS configuration"
+// Atmos-specific I/O routines using ROM calls
+// 0x0238: Output char in X, 0x023B: Input char with status in A, 0xE9E4: Init, 0xFDF0: Plot/clear
 __asm bsout
 {
 _putchar:
-	ldy #0
-	lda (sp),y
-putchar:
-    cmp #0x0A
+    ldy #0
+    lda (sp),y
+    cmp #0x0A       // Newline
     bne putchar2
     pha
-    ldx #0x0D
+    ldx #0x0D       // Precede LF with CR
     jsr 0x0238
     pla
 putchar2:
     tax
-	jmp 0x0238
- 
+    jmp 0x0238      // Output char
 }
 
 __asm bsin
 {
 _getchar:
-	jsr $023B
-	bpl _getchar
-	tax
-	jsr 0x0238
-	lda #0
-	rts
+    jsr 0x023B      // Get input char
+    bpl _getchar    // Loop until valid (negative flag set)
+    tax
+    jsr 0x0238      // Echo to screen
+    lda #0          // Clear high byte for C compatibility
+    rts
 }
 
 __asm bsget
 {
-_getchar:
-	jsr $023B
-	bpl _getchar
-	tax
-	jsr 0x0238
-	lda #0
-	rts
+_getchar_noecho:
+    jsr 0x023B      // Non-echo version for flexibility
+    bpl _getchar_noecho
+    lda #0
+    rts
 }
+
 __asm bsplot
 {
-		jsr 0xFDF0
+    jsr 0xFDF0      // Plot or clear screen (context-dependent)
 }
+
 __asm bsinit
 {
-		jsr 0xE9E4
+    jsr 0xE9E4      // Initialize Atmos environment (screen, I/O)
 }
+
 __asm dswap
 {
-		nop
+    nop             // Placeholder; no double buffering on Atmos
+}
+
+void atmos_cls(void) {
+    __asm__("jsr 0xFDF0");  // Clear screen
+}
+
+void atmos_test(void) {
+    atmos_cls();
+    const char* msg = "Hello, Atmos!\n";
+    while (*msg) {
+        _putchar(*msg++);
+    }
 }
 #elif defined(__C128__)
 #pragma code(lowcode)
