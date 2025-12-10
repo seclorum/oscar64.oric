@@ -61,6 +61,8 @@ enum DecType
 	DT_BASECLASS,
 	DT_CLABEL,
 
+	DT_BINDING,
+
 	DT_TEMPLATE,
 
 	DT_VTABLE
@@ -127,8 +129,14 @@ static const uint64 DTF_FPARAM_UNUSED	= (1ULL << 49);
 static const uint64 DTF_DEPRECATED		= (1ULL << 50);
 static const uint64 DTF_FUNC_NO_RETURN	= (1ULL << 51);
 static const uint64 DTF_PLACED			= (1ULL << 52);
+static const uint64 DTF_NO_PAGE_CROSS	= (1ULL << 53);
 
+static const uint64 DTF_ASM_PRESERVE_A	= (1ULL << 54);
+static const uint64 DTF_ASM_PRESERVE_X	= (1ULL << 55);
+static const uint64 DTF_ASM_PRESERVE_Y	= (1ULL << 56);
 
+static const uint64	DTF_MEMMAP			= (1ULL << 57);
+static const uint64 DTF_FPARAM_RANGE_LIMITED = (1ULL << 58);
 
 class Declaration;
 
@@ -165,6 +173,8 @@ public:
 
 	ScopeLevel		mLevel;
 	const Ident	*	mName;
+
+	DeclarationScope* Clone(void) const;
 
 	DeclarationScope* mParent;
 protected:
@@ -215,6 +225,7 @@ enum ExpressionType
 	EX_IF,
 	EX_ELSE,
 	EX_FOR,
+	EX_FORBODY,
 	EX_DO,
 	EX_SCOPE,
 	EX_BREAK,
@@ -242,6 +253,14 @@ enum ExpressionType
 	EX_AGGREGATE
 };
 
+static const uint32 ANAFL_LHS = (1U << 0);
+static const uint32 ANAFL_RHS = (1U << 1);
+static const uint32 ANAFL_ASSIGN = (1U << 2);
+static const uint32 ANAFL_ALIAS = (1U << 3);
+static const uint32 ANAFL_COPY = (1U << 4);
+static const uint32 ANAFL_ADDRESS = (1U << 5);
+
+
 class Expression
 {
 public:
@@ -258,6 +277,7 @@ public:
 	AsmInsType				mAsmInsType;
 	AsmInsMode				mAsmInsMode;
 	bool					mConst;
+	uint32					mFlags;
 
 	Expression* LogicInvertExpression(void);
 	Expression* ConstantFold(Errors * errors, LinkerSection* dataSection, Linker * linker = nullptr);
@@ -265,13 +285,16 @@ public:
 	bool HasSideEffects(void) const;
 	Expression* ListAppend(Expression* lexp);
 	Expression* ToAlternateThis(Declaration* pthis, Declaration* nthis);
+	Expression* Clone(void) const;
+	Expression* ToVarConst(Declaration* pvar, Declaration* pconst) const;
+
+	void ReplaceVariable(Declaration* pvar, Declaration* nvar);
 
 	bool IsSame(const Expression* exp) const;
 	bool IsRValue(void) const;
 	bool IsLValue(void) const;
 	bool IsConstRef(void) const;
 	bool IsVolatile(void) const;
-
 
 	void Dump(int ident) const;
 };
@@ -289,13 +312,13 @@ public:
 	Token				mToken;
 	Declaration		*	mBase, * mParams, * mParamPack, * mNext, * mPrev, * mConst, * mMutable, * mVolatile;
 	Declaration		*	mDefaultConstructor, * mDestructor, * mCopyConstructor, * mCopyAssignment, * mMoveConstructor, * mMoveAssignment;
-	Declaration		*	mVectorConstructor, * mVectorDestructor, * mVectorCopyConstructor, * mVectorCopyAssignment;
+	Declaration		*	mVectorConstructor, * mVectorDestructor, * mVectorCopyConstructor, * mVectorCopyAssignment, * mVectorMoveConstructor, * mVectorMoveAssignment;
 	Declaration		*	mVTable, * mClass, * mTemplate;
 	Declaration		*	mForwardParam, * mForwardCall;
 
 	Expression*			mValue, * mReturn;
 	DeclarationScope*	mScope;
-	int					mOffset, mSize, mVarIndex, mNumVars, mComplexity, mLocalSize, mAlignment, mFastCallBase, mFastCallSize, mStride, mStripe;
+	int					mOffset, mSize, mVarIndex, mNumVars, mComplexity, mLocalSize, mAlignment, mFastCallBase, mFastCallSize, mFastCallBase2, mFastCallSize2, mStride, mStripe, mVariadicSize;
 	uint8				mShift, mBits;
 	int64				mInteger, mMinValue, mMaxValue;
 	double				mNumber;
@@ -308,6 +331,10 @@ public:
 	int					mUseCount;
 	TokenSequence	*	mTokens;
 	Parser			*	mParser;
+
+	int64 MinInteger(void) const;
+	int64 MaxInteger(void) const;
+	int64 CastInteger(int64 v) const;
 
 	GrowingArray<Declaration*>	mCallers, mCalled, mFriends;
 	GrowingArray<Expression*>	mReferences;
@@ -331,6 +358,11 @@ public:
 	bool IsSimpleType(void) const;
 	bool IsReference(void) const;
 	bool IsIndexed(void) const;
+	bool ContainsArray(void) const;
+	bool IsShortIntStruct(void) const;
+	bool IsComplexStruct(void) const;
+	bool HasConstructor(void) const;
+	bool IsPointerType(void) const;
 
 	void SetDefined(void);
 
@@ -354,6 +386,7 @@ public:
 	Declaration* BuildArrayPointer(void);
 	Declaration* BuildAddressOfPointer(void);
 	Declaration* DeduceAuto(Declaration* dec);
+	Declaration* DeduceAutoInit(Declaration* dec);
 	Declaration* ConstCast(Declaration* ntype);
 	bool IsNullConst(void) const;
 	bool IsAuto(void) const;
@@ -361,8 +394,9 @@ public:
 	DecType ValueType(void) const;
 
 	bool CanResolveTemplate(Expression* pexp, Declaration* tdec);
-	bool ResolveTemplate(Declaration* fdec, Declaration * tdec);
+	bool ResolveTemplate(Declaration* fdec, Declaration * tdec, bool same, bool preliminary);
 	bool ResolveTemplate(Expression* pexp, Declaration* tdec);
+	bool ResolveTemplateParameterList(Expression* pexp, Declaration* pdec, bool preliminary);
 
 	Declaration* ExpandTemplate(DeclarationScope* scope);
 
@@ -380,5 +414,6 @@ extern Declaration* TheBoolTypeDeclaration, * TheFloatTypeDeclaration, * TheVoid
 extern Declaration* TheVoidFunctionTypeDeclaration, * TheConstVoidValueDeclaration;
 extern Declaration* TheCharPointerTypeDeclaration, * TheConstCharPointerTypeDeclaration;
 extern Declaration* TheNullptrConstDeclaration, * TheZeroIntegerConstDeclaration, * TheZeroFloatConstDeclaration, * TheNullPointerTypeDeclaration;
+extern Declaration* TheTrueConstDeclaration, * TheFalseConstDeclaration;
 extern Expression* TheVoidExpression;
 

@@ -1,5 +1,14 @@
 rem @echo off
 
+@call :test loopunrolltest.cpp
+@if %errorlevel% neq 0 goto :error
+
+@call :test rolrortest.cpp
+@if %errorlevel% neq 0 goto :error
+
+@call :test maskcheck.c
+@if %errorlevel% neq 0 goto :error
+
 @call :test bitfields.cpp
 @if %errorlevel% neq 0 goto :error
 
@@ -15,10 +24,16 @@ rem @echo off
 @call :testh opp_vector.cpp
 @if %errorlevel% neq 0 goto :error
 
+@call :testh opp_static_vector.cpp
+@if %errorlevel% neq 0 goto :error
+
 @call :testh opp_vector_string.cpp
 @if %errorlevel% neq 0 goto :error
 
 @call :testh opp_string_init.cpp
+@if %errorlevel% neq 0 goto :error
+
+@call :testh opp_optional.cpp
 @if %errorlevel% neq 0 goto :error
 
 @call :testh opp_streamtest.cpp
@@ -33,7 +48,7 @@ rem @echo off
 @call :testh opp_list.cpp
 @if %errorlevel% neq 0 goto :error
 
-@call :testh opp_functional.cpp
+@call :testn opp_functional.cpp
 @if %errorlevel% neq 0 goto :error
 
 @call :testh operatoroverload.cpp
@@ -51,7 +66,7 @@ rem @echo off
 @call :testh constructortest.cpp
 @if %errorlevel% neq 0 goto :error
 
-@call :testh copyconstructor.cpp
+@call :testn copyconstructor.cpp
 @if %errorlevel% neq 0 goto :error
 
 @call :testh copyassign.cpp
@@ -195,6 +210,9 @@ rem @echo off
 @call :test fixmathtest.c
 @if %errorlevel% neq 0 goto :error
 
+@call :testn andmultest.cpp
+@if %errorlevel% neq 0 goto :error
+
 @call :test enumswitch.c
 @if %errorlevel% neq 0 goto :error
 
@@ -202,6 +220,9 @@ rem @echo off
 @if %errorlevel% neq 0 goto :error
 
 @call :test structoffsettest2.c
+@if %errorlevel% neq 0 goto :error
+
+@call :test structsplittest.c
 @if %errorlevel% neq 0 goto :error
 
 @call :test funcvartest.c
@@ -259,121 +280,136 @@ echo Failed with error #%errorlevel%.
 exit /b %errorlevel%
 
 :testh
-..\bin\oscar64 -e -bc %~1
+..\bin\oscar64 -ea -g -bc %~1
 @if %errorlevel% neq 0 goto :error
 
-..\bin\oscar64 -e -n %~1
+..\bin\oscar64 -ea -g -n %~1
 @if %errorlevel% neq 0 goto :error
 
-..\bin\oscar64 -e -O2 -bc %~1
+..\bin\oscar64 -ea -g -O2 -bc %~1
 @if %errorlevel% neq 0 goto :error
 
-..\bin\oscar64 -e -O2 -n %~1
+..\bin\oscar64 -ea -g -O2 -n %~1
 @if %errorlevel% neq 0 goto :error
 
-..\bin\oscar64 -e -O2 -n -dHEAPCHECK %~1
+..\bin\oscar64 -ea -g -O2 -n -dHEAPCHECK %~1
 @if %errorlevel% neq 0 goto :error
 
-..\bin\oscar64 -e -O0 -bc %~1
+..\bin\oscar64 -ea -g -O2 -xz -Oz -n %~1
 @if %errorlevel% neq 0 goto :error
 
-..\bin\oscar64 -e -O0 -n %~1
+..\bin\oscar64 -ea -g -O2 -Oo -n %~1
 @if %errorlevel% neq 0 goto :error
 
-..\bin\oscar64 -e -Os -bc %~1
+..\bin\oscar64 -ea -g -O2 -Ox -n %~1
 @if %errorlevel% neq 0 goto :error
 
-..\bin\oscar64 -e -Os -n %~1
+..\bin\oscar64 -ea -g -O0 -bc %~1
 @if %errorlevel% neq 0 goto :error
 
-..\bin\oscar64 -e -O3 -bc %~1
+..\bin\oscar64 -ea -g -O0 -n %~1
 @if %errorlevel% neq 0 goto :error
 
-..\bin\oscar64 -e -O3 -n %~1
+..\bin\oscar64 -ea -g -Os -bc %~1
 @if %errorlevel% neq 0 goto :error
 
-..\bin\oscar64 -e -O3 -n -dHEAPCHECK %~1
+..\bin\oscar64 -ea -g -Os -n %~1
+@if %errorlevel% neq 0 goto :error
+
+..\bin\oscar64 -ea -g -O3 -bc %~1
+@if %errorlevel% neq 0 goto :error
+
+..\bin\oscar64 -ea -g -O3 -n %~1
+@if %errorlevel% neq 0 goto :error
+
+..\bin\oscar64 -ea -g -O3 -n -dHEAPCHECK %~1
 @if %errorlevel% neq 0 goto :error
 
 @exit /b 0
 
 :test
-..\bin\oscar64 -e -bc %~1
+..\bin\oscar64 -ea -g -bc %~1
 @if %errorlevel% neq 0 goto :error
 
-..\bin\oscar64 -e -n %~1
+..\bin\oscar64 -ea -g -n %~1
 @if %errorlevel% neq 0 goto :error
 
-..\bin\oscar64 -e -O2 -bc %~1
+..\bin\oscar64 -ea -g -O2 -bc %~1
 @if %errorlevel% neq 0 goto :error
 
-..\bin\oscar64 -e -O2 -n %~1
+..\bin\oscar64 -ea -g -O2 -n %~1
 @if %errorlevel% neq 0 goto :error
 
-..\bin\oscar64 -e -O0 -bc %~1
+..\bin\oscar64 -ea -g -O0 -bc %~1
 @if %errorlevel% neq 0 goto :error
 
-..\bin\oscar64 -e -O0 -n %~1
+..\bin\oscar64 -ea -g -O0 -n %~1
 @if %errorlevel% neq 0 goto :error
 
-..\bin\oscar64 -e -Os -bc %~1
+..\bin\oscar64 -ea -g -Os -bc %~1
 @if %errorlevel% neq 0 goto :error
 
-..\bin\oscar64 -e -Os -n %~1
+..\bin\oscar64 -ea -g -Os -n %~1
 @if %errorlevel% neq 0 goto :error
 
-..\bin\oscar64 -e -O3 -bc %~1
+..\bin\oscar64 -ea -g -O3 -bc %~1
 @if %errorlevel% neq 0 goto :error
 
-..\bin\oscar64 -e -O3 -n %~1
+..\bin\oscar64 -ea -g -O3 -n %~1
 @if %errorlevel% neq 0 goto :error
 
-..\bin\oscar64 -e -O2 -xz -Oz -n %~1
+..\bin\oscar64 -ea -g -O2 -xz -Oz -n %~1
 @if %errorlevel% neq 0 goto :error
 
-..\bin\oscar64 -e -O2 -Oo -n %~1
+..\bin\oscar64 -ea -g -O2 -Oo -n %~1
+@if %errorlevel% neq 0 goto :error
+
+..\bin\oscar64 -ea -g -O2 -Ox -n %~1
 @if %errorlevel% neq 0 goto :error
 
 @exit /b 0
 
 :testb
-..\bin\oscar64 -e -bc %~1
+..\bin\oscar64 -ea -g -bc %~1
 @if %errorlevel% neq 0 goto :error
 
-..\bin\oscar64 -e -bc -O2 %~1
+..\bin\oscar64 -ea -g -bc -O2 %~1
 @if %errorlevel% neq 0 goto :error
 
-..\bin\oscar64 -e -bc -O0 %~1
+..\bin\oscar64 -ea -g -bc -O0 %~1
 @if %errorlevel% neq 0 goto :error
 
-..\bin\oscar64 -e -bc -Os %~1
+..\bin\oscar64 -ea -g -bc -Os %~1
 @if %errorlevel% neq 0 goto :error
 
-..\bin\oscar64 -e -bc -O3 %~1
+..\bin\oscar64 -ea -g -bc -O3 %~1
 @if %errorlevel% neq 0 goto :error
 
 @exit /b 0
 
 :testn
-..\bin\oscar64 -e -n %~1
+..\bin\oscar64 -ea -g -n %~1
 @if %errorlevel% neq 0 goto :error
 
-..\bin\oscar64 -e -O2 -n %~1
+..\bin\oscar64 -ea -g -O2 -n %~1
 @if %errorlevel% neq 0 goto :error
 
-..\bin\oscar64 -e -O0 -n %~1
+..\bin\oscar64 -ea -g -O0 -n %~1
 @if %errorlevel% neq 0 goto :error
 
-..\bin\oscar64 -e -Os -n %~1
+..\bin\oscar64 -ea -g -Os -n %~1
 @if %errorlevel% neq 0 goto :error
 
-..\bin\oscar64 -e -O3 -n %~1
+..\bin\oscar64 -ea -g -O3 -n %~1
 @if %errorlevel% neq 0 goto :error
 
-..\bin\oscar64 -e -O2 -xz -Oz -n %~1
+..\bin\oscar64 -ea -g -O2 -xz -Oz -n %~1
 @if %errorlevel% neq 0 goto :error
 
-..\bin\oscar64 -e -O2 -Oo -n %~1
+..\bin\oscar64 -ea -g -O2 -Oo -n %~1
+@if %errorlevel% neq 0 goto :error
+
+..\bin\oscar64 -ea -g -O2 -Ox -n %~1
 @if %errorlevel% neq 0 goto :error
 
 @exit /b 0

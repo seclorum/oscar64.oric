@@ -36,6 +36,8 @@ Compiler::Compiler(void)
 	mGlobalOptimizer = new GlobalOptimizer(mErrors, mLinker);
 
 	mCartridgeID = 0x0000;
+	mCartridgeSubType = 0x00;
+	strcpy_s(mCartridgeName, "OSCAR");
 }
 
 Compiler::~Compiler(void)
@@ -524,6 +526,8 @@ bool Compiler::GenerateCode(void)
 			regionZeroPage = mLinker->AddRegion(identZeroPage, 0x00e0, 0x00ff);
 		else if (mCompilerOptions & (COPT_EXTENDED_ZERO_PAGE | COPT_TARGET_NES))
 			regionZeroPage = mLinker->AddRegion(identZeroPage, 0x0080, 0x00ff);
+		else if (mTargetMachine == TMACH_PET_8K || mTargetMachine == TMACH_PET_16K || mTargetMachine == TMACH_PET_32K)
+			regionZeroPage = mLinker->AddRegion(identZeroPage, 0x00ed, 0x00f7);
 		else
 			regionZeroPage = mLinker->AddRegion(identZeroPage, 0x00f7, 0x00ff);
 	}
@@ -537,6 +541,12 @@ bool Compiler::GenerateCode(void)
 		{
 			switch (mTargetMachine)
 			{
+			case TMACH_MEGA65:
+				if (mCompilerOptions & COPT_NATIVE)
+					regionStartup = mLinker->AddRegion(identStartup, 0x2001, 0x2080);
+				else
+					regionStartup = mLinker->AddRegion(identStartup, 0x2001, 0x2100);
+				break;
 			case TMACH_C64:
 			case TMACH_X16:
 				if (mCompilerOptions & COPT_NATIVE)
@@ -639,6 +649,9 @@ bool Compiler::GenerateCode(void)
 		{
 			switch (mTargetMachine)
 			{
+			case TMACH_MEGA65:
+				regionBytecode = mLinker->AddRegion(identBytecode, 0x2100, 0x2200);
+				break;
 			case TMACH_C64:
 			case TMACH_X16:
 				regionBytecode = mLinker->AddRegion(identBytecode, 0x0900, 0x0a00);
@@ -700,6 +713,9 @@ bool Compiler::GenerateCode(void)
 			{
 				switch (mTargetMachine)
 				{
+				case TMACH_MEGA65:
+					regionMain = mLinker->AddRegion(identMain, 0x2300, 0xc000);
+					break;
 				case TMACH_C64:
 					regionMain = mLinker->AddRegion(identMain, 0x0a00, 0xa000);
 					break;
@@ -751,6 +767,14 @@ bool Compiler::GenerateCode(void)
 			{
 				switch (mTargetMachine)
 				{
+				case TMACH_MEGA65:
+					// TODO: Disable M65 cartridges for now.
+					//
+					// if (mCompilerOptions & (COPT_TARGET_CRT8 | COPT_TARGET_CRT16))
+					// 	regionMain = mLinker->AddRegion(identMain, 0x2666, 0xff00);
+					// else
+					regionMain = mLinker->AddRegion(identMain, 0x2080, 0xc000);
+					break;
 				case TMACH_C64:
 
 					if (mCompilerOptions & (COPT_TARGET_CRT8 | COPT_TARGET_CRT16))
@@ -956,6 +980,7 @@ bool Compiler::GenerateCode(void)
 	if (mInterCodeModule->mProcedures.Size() > 0)
 	{
 		RegisterRuntime(loc, Ident::Unique("mul16by8"));
+		RegisterRuntime(loc, Ident::Unique("mul32by8"));
 		RegisterRuntime(loc, Ident::Unique("fsplitt"));
 		RegisterRuntime(loc, Ident::Unique("fsplitx"));
 		RegisterRuntime(loc, Ident::Unique("fsplita"));
@@ -968,6 +993,7 @@ bool Compiler::GenerateCode(void)
 		RegisterRuntime(loc, Ident::Unique("mods16"));
 		RegisterRuntime(loc, Ident::Unique("divu16"));
 		RegisterRuntime(loc, Ident::Unique("modu16"));
+		RegisterRuntime(loc, Ident::Unique("divmods16"));
 		RegisterRuntime(loc, Ident::Unique("bitshift"));
 		RegisterRuntime(loc, Ident::Unique("ffloor"));
 		RegisterRuntime(loc, Ident::Unique("fceil"));
@@ -987,6 +1013,7 @@ bool Compiler::GenerateCode(void)
 		RegisterRuntime(loc, Ident::Unique("mods32"));
 		RegisterRuntime(loc, Ident::Unique("divu32"));
 		RegisterRuntime(loc, Ident::Unique("modu32"));
+		RegisterRuntime(loc, Ident::Unique("divmods32"));
 
 		RegisterRuntime(loc, Ident::Unique("store32"));
 		RegisterRuntime(loc, Ident::Unique("load32"));
@@ -1059,7 +1086,10 @@ bool Compiler::GenerateCode(void)
 	for (int i = 0; i < mNativeCodeGenerator->mProcedures.Size(); i++)
 	{
 		if (mCompilerOptions & COPT_VERBOSE2)
-			printf("Assemble native code <%s>\n", mNativeCodeGenerator->mProcedures[i]->mInterProc->mIdent->mString);
+		{
+			if (mNativeCodeGenerator->mProcedures[i]->mInterProc)
+				printf("Assemble native code <%s>\n", mNativeCodeGenerator->mProcedures[i]->mInterProc->mIdent->mString);
+		}
 		mNativeCodeGenerator->mProcedures[i]->Assemble();
 	}
 
@@ -1343,7 +1373,7 @@ bool Compiler::WriteOutputFile(const char* targetPath, DiskImage * d64)
 		strcat_s(prgPath, "crt");
 		if (mCompilerOptions & COPT_VERBOSE)
 			printf("Writing <%s>\n", prgPath);
-		mLinker->WriteCrtFile(prgPath, mCartridgeID);
+		mLinker->WriteCrtFile(prgPath, mCartridgeID, mCartridgeSubType, mCartridgeName);
 	}
 	else if (mCompilerOptions & COPT_TARGET_BIN)
 	{
@@ -1419,7 +1449,7 @@ bool Compiler::WriteOutputFile(const char* targetPath, DiskImage * d64)
 	return true;
 }
 
-int Compiler::ExecuteCode(bool profile, int trace)
+int Compiler::ExecuteCode(bool profile, int trace, bool asserts)
 {
 	Location	loc;
 
@@ -1435,12 +1465,16 @@ int Compiler::ExecuteCode(bool profile, int trace)
 		memcpy(emu->mMemory + mLinker->mProgramStart, mLinker->mMemory + mLinker->mProgramStart, mLinker->mProgramEnd - mLinker->mProgramStart);
 		emu->mMemory[0x2d] = mLinker->mProgramEnd & 0xff;
 		emu->mMemory[0x2e] = mLinker->mProgramEnd >> 8;
-		ecode = emu->Emulate(2061, trace);
+		LinkerObject* oexit = nullptr;
+		if (asserts)
+			oexit = mLinker->FindObjectByName("exit");
+
+		ecode = emu->Emulate(2061, (oexit ? oexit->mAddress : 0x0000),  trace);
 	}
 	else if (mCompilerOptions & COPT_TARGET_CRT)
 	{
 		memcpy(emu->mMemory + 0x8000, mLinker->mMemory + 0x0800, 0x4000);
-		ecode = emu->Emulate(0x8009, trace);
+		ecode = emu->Emulate(0x8009, 0x0000, trace);
 	}
 
 	printf("Emulation result %d\n", ecode);
@@ -1497,9 +1531,9 @@ bool Compiler::WriteCszFile(const char* filename)
 
 				ExpandingArray<SourceCount>	ea;
 
-				for (int j = 0; j < lo->mCodeLocations.Size(); j++)
+				for (int j = 0; j < lo->mCodeOrigins.Size(); j++)
 				{
-					const CodeLocation& co(lo->mCodeLocations[j]);
+					const CodeLocation& co(lo->mCodeOrigins[j]);
 					const Location* ls = &(co.mLocation);
 					while (ls->mFrom)
 						ls = ls->mFrom;
@@ -1643,6 +1677,26 @@ bool Compiler::WriteDbjFile(const char* filename)
 						lo->mCodeLocations[j].mLocation.mFileName,
 						lo->mCodeLocations[j].mLocation.mLine);
 				}
+				fprintf(file, "], \n\t\t\t\"origins\":[\n");
+				lfirst = true;
+
+				for (int j = 0; j < lo->mCodeOrigins.Size(); j++)
+				{				
+					const Location* loc = &(lo->mCodeOrigins[j].mLocation);
+					while (loc)
+					{
+						if (!lfirst)
+							fprintf(file, ",\n");
+						lfirst = false;
+
+						fprintf(file, "\t\t\t{\"start\": %d, \"end\": %d, \"source\": \"%s\", \"line\": %d}",
+							lo->mCodeOrigins[j].mStart + lo->mAddress,
+							lo->mCodeOrigins[j].mEnd + lo->mAddress,
+							loc->mFileName,
+							loc->mLine);
+						loc = loc->mFrom;
+					}
+				}
 
 				fprintf(file, "], \n\t\t\t\"variables\":[\n");
 
@@ -1760,13 +1814,13 @@ bool Compiler::WriteDbjFile(const char* filename)
 				fprintf(file, "\t\t{\"name\": \"%s\", \"typeid\": %d, \"size\": %d, \"type\": \"array\", \"eid\": %d}", dec->mQualIdent ? dec->mQualIdent->mString : "", i, dec->mSize, types.IndexOrPush(dec->mBase));
 				break;
 			case DT_TYPE_POINTER:
-				fprintf(file, "\t\t{\"name\": \"%s\", \"typeid\": %d, \"size\": %d, \"type\": \"ptr\", eid: %d}", dec->mQualIdent ? dec->mQualIdent->mString : "", i, dec->mSize, types.IndexOrPush(dec->mBase));
+				fprintf(file, "\t\t{\"name\": \"%s\", \"typeid\": %d, \"size\": %d, \"type\": \"ptr\", \"eid\": %d}", dec->mQualIdent ? dec->mQualIdent->mString : "", i, dec->mSize, types.IndexOrPush(dec->mBase));
 				break;
 			case DT_TYPE_REFERENCE:
-				fprintf(file, "\t\t{\"name\": \"%s\", \"typeid\": %d, \"size\": %d, \"type\": \"ref\", eid: %d}", dec->mQualIdent ? dec->mQualIdent->mString : "", i, dec->mSize, types.IndexOrPush(dec->mBase));
+				fprintf(file, "\t\t{\"name\": \"%s\", \"typeid\": %d, \"size\": %d, \"type\": \"ref\", \"eid\": %d}", dec->mQualIdent ? dec->mQualIdent->mString : "", i, dec->mSize, types.IndexOrPush(dec->mBase));
 				break;
 			case DT_TYPE_RVALUEREF:
-				fprintf(file, "\t\t{\"name\": \"%s\", \"typeid\": %d, \"size\": %d, \"type\": \"rref\", eid: %d}", dec->mQualIdent ? dec->mQualIdent->mString : "", i, dec->mSize, types.IndexOrPush(dec->mBase));
+				fprintf(file, "\t\t{\"name\": \"%s\", \"typeid\": %d, \"size\": %d, \"type\": \"rref\", \"eid\": %d}", dec->mQualIdent ? dec->mQualIdent->mString : "", i, dec->mSize, types.IndexOrPush(dec->mBase));
 				break;
 			case DT_TYPE_ENUM:
 			{

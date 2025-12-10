@@ -109,6 +109,9 @@ inline void vic_waitTop(void);
 // wait for the top of the frame and then for the bottom of the visual area
 inline void vic_waitFrame(void);
 
+// return true if the beam is below the frame
+inline bool vic_isBottom(void);
+
 // wait for n frames
 void vic_waitFrames(char n);
 
@@ -117,6 +120,9 @@ void vic_waitLine(int line);
 
 // wait for beam to be below a line
 void vic_waitBelow(int line);
+
+// wait for beam to be in a given range on screen
+void vic_waitRange(char below, char above);
 
 // reference to the VIC chip
 #define vic	(*((struct VIC *)0xd000))

@@ -51,6 +51,7 @@ const char* TokenNames[] =
 	"'extern'",
 	"'inline'",
 	"'__assume'",
+	"'static_assert'",
 
 	"__asm",
 	"__interrupt",
@@ -63,6 +64,8 @@ const char* TokenNames[] =
 	"__forceinline",
 	"__striped",
 	"__dynstack",
+	"__preserves",
+	"__memmap",
 
 	"number",
 	"char",
@@ -178,14 +181,14 @@ const char* TokenNames[] =
 
 
 Macro::Macro(const Ident* ident, MacroDict * scope)
-	: mIdent(ident), mString(nullptr), mNumArguments(-1), mScope(scope), mVariadic(false)
+	: mIdent(ident), mString(nullptr), mBuffer(nullptr), mSize(0), mNumArguments(-1), mScope(scope), mVariadic(false)
 {
 
 }
 
 Macro::~Macro(void)
 {
-
+	delete[] mBuffer;
 }
 
 void Macro::SetString(const char* str)
@@ -196,8 +199,6 @@ void Macro::SetString(const char* str)
 
 void Macro::SetString(const char* str, ptrdiff_t length)
 {
-	char* nstr = new char[length + 2];
-
 	while (*str != 0 && *str <= ' ')
 	{
 		length--;
@@ -206,12 +207,19 @@ void Macro::SetString(const char* str, ptrdiff_t length)
 	while (length > 0 && str[length - 1] <= ' ')
 		length--;
 
-	if (length > 0)
-		memcpy(nstr, str, length);
+	if (length + 2 > mSize)
+	{
+		delete[] mBuffer;
+		mSize = (length + 9) & ~7;
+		mBuffer = new char[mSize];
+	}
 
-	nstr[length] = ' ';
-	nstr[length + 1] = 0;
-	mString = nstr;
+	if (length > 0)
+		memcpy(mBuffer, str, length);
+
+	mBuffer[length] = ' ';
+	mBuffer[length + 1] = 0;
+	mString = mBuffer;
 }
 
 
@@ -360,6 +368,12 @@ Scanner::Scanner(Errors* errors, Preprocessor* preprocessor)
 
 	mOnceDict = new MacroDict();
 
+	mFileMacro = new Macro(Ident::Unique("__FILE__"), nullptr);
+	mDefines->Insert(mFileMacro);
+
+	mLineMacro = new Macro(Ident::Unique("__LINE__"), nullptr);
+	mDefines->Insert(mLineMacro);
+
 	NextChar();
 
 	assert(sizeof(TokenNames) == NUM_TOKENS * sizeof(char*));
@@ -484,6 +498,15 @@ void Scanner::UngetToken(Token token)
 {
 	mUngetToken = mToken;
 	mToken = token;
+	if (mRecord)
+		mRecordLast = mRecordPrev;
+}
+
+void Scanner::UngetToken(Token token, const Ident* ident)
+{
+	mUngetToken = mToken;
+	mToken = token;
+	mTokenIdent = ident;
 	if (mRecord)
 		mRecordLast = mRecordPrev;
 }
@@ -710,7 +733,6 @@ void Scanner::NextPreToken(void)
 									mErrors->Error(mLocation, EFATAL_MACRO_EXPANSION_DEPTH, "Maximum macro expansion depth exceeded", mTokenIdent);
 								mLine = macro->mString;
 								mOffset = 0;
-								NextChar();
 							}
 						}
 						else
@@ -822,28 +844,36 @@ void Scanner::NextPreToken(void)
 		}
 		else if (mToken == TK_PREP_IDENT)
 		{
-			Macro* def = nullptr;
-			if (mDefineArguments)
-				def = mDefineArguments->Lookup(mTokenIdent);
-			if (!def)
-				def = mDefines->Lookup(mTokenIdent);
-
-			if (def)
+			if (mTokenIdent->mString[0])
 			{
-				if (def->mNumArguments == -1)
+				Macro* def = nullptr;
+				if (mDefineArguments)
+					def = mDefineArguments->Lookup(mTokenIdent);
+				if (!def)
+					def = mDefines->Lookup(mTokenIdent);
+
+				if (def)
 				{
-					mToken = TK_STRING;
-					int i = 0;
-					while ((mTokenString[i] = def->mString[i]))
-						i++;
-					mTokenStringSize = i;
-					return;
+					if (def->mNumArguments == -1)
+					{
+						mToken = TK_STRING;
+						int i = 0;
+						while ((mTokenString[i] = def->mString[i]))
+							i++;
+						mTokenStringSize = i;
+						return;
+					}
+					else
+						mErrors->Error(mLocation, EERR_INVALID_PREPROCESSOR, "Invalid preprocessor command", mTokenIdent);
 				}
 				else
 					mErrors->Error(mLocation, EERR_INVALID_PREPROCESSOR, "Invalid preprocessor command", mTokenIdent);
 			}
 			else
-				mErrors->Error(mLocation, EERR_INVALID_PREPROCESSOR, "Invalid preprocessor command", mTokenIdent);
+			{
+				mToken = TK_HASH;
+				return;
+			}
 		}
 		else if (mToken == TK_PREP_UNDEF)
 		{
@@ -1098,6 +1128,19 @@ void Scanner::NextPreToken(void)
 				else
 					mDefineArguments = def->mScope;
 
+				if (def == mFileMacro) 
+				{
+					char fileName[256];
+					sprintf_s(fileName, "\"%s\"", mPreprocessor->mSource->mFileName);
+					def->SetString(fileName);
+				}
+				else if (def == mLineMacro) 
+				{
+					char lineNumber[16];
+					sprintf_s(lineNumber, "%d", mPreprocessor->mLocation.mLine);
+					def->SetString(lineNumber);
+				}
+
 				ex->mLine = mLine;
 				ex->mOffset = mOffset;
 				ex->mLink = mMacroExpansion;
@@ -1116,46 +1159,70 @@ void Scanner::NextPreToken(void)
 				while (mTokenChar == ' ')
 					NextChar();
 
-				while (mTokenChar == '#' && mLine[mOffset] == '#')
+				if (mTokenChar == '#' && mLine[mOffset] == '#')
 				{
-					mOffset++;
-					NextChar();
-
 					char	tkbase[256];
 					strcpy_s(tkbase, mTokenIdent->mString);
 
-					ptrdiff_t	n = 0;
-					char		tkident[256];
-					while (IsIdentChar(mTokenChar))
-					{
-						if (n < 255)
-							tkident[n++] = mTokenChar;
+					do {
+						mOffset++;
 						NextChar();
-					}
-					tkident[n] = 0;
 
-					const Ident* ntkident = Ident::Unique(tkident);
+						ptrdiff_t	n = 0;
+						char		tkident[256];
+						while (IsIdentChar(mTokenChar))
+						{
+							if (n < 255)
+								tkident[n++] = mTokenChar;
+							NextChar();
+						}
+						tkident[n] = 0;
 
-					Macro* def = nullptr;
-					if (mDefineArguments)
-						def = mDefineArguments->Lookup(ntkident);
-					if (!def)
-						def = mDefines->Lookup(ntkident);
+						const Ident* ntkident = Ident::Unique(tkident);
 
-					if (def)
-						strcat_s(tkbase, def->mString);
-					else
-						strcat_s(tkbase, tkident);
+						Macro* def = nullptr;
+						if (mDefineArguments)
+							def = mDefineArguments->Lookup(ntkident);
+						if (!def)
+							def = mDefines->Lookup(ntkident);
 
-					n = strlen(tkbase);
-					while (n > 0 && tkbase[n - 1] == ' ')
-						n--;
-					tkbase[n] = 0;
+						if (def)
+							strcat_s(tkbase, def->mString);
+						else
+							strcat_s(tkbase, tkident);
 
-					mTokenIdent = Ident::Unique(tkbase);
+						n = strlen(tkbase);
+						while (n > 0 && tkbase[n - 1] == ' ')
+							n--;
+						tkbase[n] = 0;
+
+						while (mTokenChar == ' ')
+							NextChar();
+
+					} while (mTokenChar == '#' && mLine[mOffset] == '#');
+
+					ptrdiff_t n = strlen(tkbase);
+					char* str = new char[n + 1];
+					strcpy_s(str, n + 1, tkbase);
+
+					MacroExpansion* ex = new MacroExpansion();
+					ex->mDefinedArguments = mDefineArguments;
+
+					ex->mLine = mLine;
+					ex->mOffset = mOffset;
+					ex->mLink = mMacroExpansion;
+					ex->mChar = mTokenChar;
+
+					mMacroExpansion = ex;
+					mMacroExpansionDepth++;
+					if (mMacroExpansionDepth > 1024)
+						mErrors->Error(mLocation, EFATAL_MACRO_EXPANSION_DEPTH, "Maximum macro expansion depth exceeded", mTokenIdent);
+					mLine = str;
+					mOffset = 0;
+					NextChar();
 				}
-
-				return;
+				else
+					return;
 			}
 		}
 		else
@@ -1800,6 +1867,8 @@ void Scanner::NextRawToken(void)
 					mToken = TK_ASM;
 				else if (!strcmp(tkident, "__assume"))
 					mToken = TK_ASSUME;
+				else if (!strcmp(tkident, "static_assert"))
+					mToken = TK_STATIC_ASSERT;
 				else if (!strcmp(tkident, "__interrupt"))
 					mToken = TK_INTERRUPT;
 				else if (!strcmp(tkident, "__hwinterrupt"))
@@ -1820,6 +1889,10 @@ void Scanner::NextRawToken(void)
 					mToken = TK_STRIPED;
 				else if (!strcmp(tkident, "__dynstack"))
 					mToken = TK_DYNSTACK;
+				else if (!strcmp(tkident, "__preserves"))
+					mToken = TK_PRESERVES;
+				else if (!strcmp(tkident, "__memmap"))
+					mToken = TK_MEMMAP;
 				else if ((mCompilerOptions & COPT_CPLUSPLUS) && !strcmp(tkident, "namespace"))
 					mToken = TK_NAMESPACE;
 				else if ((mCompilerOptions & COPT_CPLUSPLUS) && !strcmp(tkident, "using"))
@@ -1979,7 +2052,7 @@ void Scanner::NextRawToken(void)
 
 					default:
 						// dirty little hack to implement token preview, got to fix
-						// this with an infinit preview sequence at one point
+						// this with an infinite preview sequence at one point
 						mUngetToken = mToken;
 						mToken = TK_OPERATOR;
 						return;
@@ -2293,9 +2366,13 @@ bool Scanner::NextChar(void)
 					char	buffer[20];
 					sprintf_s(buffer, "%d", int(mMacroExpansion->mLoopCount));
 					mMacroExpansion->mLoopIndex->SetString(buffer);
+					mTokenChar = mMacroExpansion->mChar;
 					mOffset = 0;
-					continue;
+
+					return true;
 				}
+				else
+					mMacroExpansion->mChar = ' ';
 			}
 
 			MacroExpansion* mac = mMacroExpansion->mLink;
@@ -2361,8 +2438,10 @@ void Scanner::ParseNumberToken(void)
 				NextChar();
 				mToken = TK_INTEGERUL;
 			}
-			else
+			else if (mant < 0x10000)
 				mToken = TK_INTEGERU;
+			else
+				mToken = TK_INTEGERUL;
 		}
 		else
 		{
@@ -2379,14 +2458,14 @@ void Scanner::ParseNumberToken(void)
 				else
 					mToken = TK_INTEGERUL;
 			}
-			else if (mant < 65536)
-			{
+			else if (mant < 0x8000)
+				mToken = TK_INTEGER;
+			else if (mant < 0x10000)
 				mToken = TK_INTEGERU;
-			}
+			else if (mant < 0x80000000)
+				mToken = TK_INTEGERL;
 			else
-			{
 				mToken = TK_INTEGERUL;
-			}
 		}
 
 		mTokenInteger = mant;
@@ -2414,8 +2493,10 @@ void Scanner::ParseNumberToken(void)
 				NextChar();
 				mToken = TK_INTEGERUL;
 			}
-			else
+			else if (mant < 0x10000)
 				mToken = TK_INTEGERU;
+			else
+				mToken = TK_INTEGERUL;
 		}
 		else
 		{
@@ -2430,9 +2511,9 @@ void Scanner::ParseNumberToken(void)
 				else
 					mToken = TK_INTEGERL;
 			}
-			else if (mant < 32768)
+			else if (mant < 0x8000)
 				mToken = TK_INTEGER;
-			else if (mant < 65536)
+			else if (mant < 0x10000)
 				mToken = TK_INTEGERU;
 			else if (mant < 0x80000000)
 				mToken = TK_INTEGERL;
@@ -2477,8 +2558,10 @@ void Scanner::ParseNumberToken(void)
 					NextChar();
 					mToken = TK_INTEGERUL;
 				}
-				else
+				else if (mant < 0x10000)
 					mToken = TK_INTEGERU;
+				else
+					mToken = TK_INTEGERUL;
 			}
 			else
 			{
@@ -2493,7 +2576,7 @@ void Scanner::ParseNumberToken(void)
 					else
 						mToken = TK_INTEGERL;
 				}
-				else if (mant < 32768)
+				else if (mant < 0x8000)
 					mToken = TK_INTEGER;
 				else
 					mToken = TK_INTEGERL;
@@ -2630,7 +2713,11 @@ int64 Scanner::PrepParseSimple(bool skip)
 			v = 0;
 		}
 		else
-			mErrors->Error(mLocation, ERRR_PREPROCESSOR, "Invalid preprocessor symbol", mTokenIdent);
+		{
+			mErrors->Error(mLocation, EWARN_EXPAND_UNDEFINED_MACRO_IDENT, "Expand undefined identifier in condition to 0", mTokenIdent);
+			NextPreToken();
+			v = 0;
+		}
 		break;
 	default:
 		mErrors->Error(mLocation, ERRR_PREPROCESSOR, "Invalid preprocessor token", TokenName(mToken));

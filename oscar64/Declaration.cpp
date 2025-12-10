@@ -31,6 +31,17 @@ DeclarationScope::~DeclarationScope(void)
 	delete[] mHash;
 }
 
+DeclarationScope* DeclarationScope::Clone(void) const
+{
+	DeclarationScope* scope = new DeclarationScope(mParent, mLevel, mName);
+	for (int i = 0; i < mHashSize; i++)
+	{
+		if (mHash[i].mIdent)
+			scope->Insert(mHash[i].mIdent, mHash[i].mDec);
+	}
+	return scope;
+}
+
 const Ident* DeclarationScope::Mangle(const Ident* ident) const
 {
 	if (mName && ident)
@@ -145,7 +156,7 @@ void DeclarationScope::End(const Location& loc)
 }
 
 Expression::Expression(const Location& loc, ExpressionType type)
-	:	mLocation(loc), mEndLocation(loc), mType(type), mLeft(nullptr), mRight(nullptr), mConst(false), mDecType(nullptr), mDecValue(nullptr), mToken(TK_NONE)
+	:	mLocation(loc), mEndLocation(loc), mType(type), mLeft(nullptr), mRight(nullptr), mConst(false), mDecType(nullptr), mDecValue(nullptr), mToken(TK_NONE), mFlags(0)
 {
 	static uint32	gUID = 0;
 	mUID = gUID++;
@@ -262,6 +273,9 @@ void Expression::Dump(int ident) const
 		break;
 	case EX_FOR:
 		printf("FOR");
+		break;
+	case EX_FORBODY:
+		printf("FORBODY");
 		break;
 	case EX_DO:
 		printf("DO");
@@ -489,6 +503,50 @@ Expression* Expression::LogicInvertExpression(void)
 		ex->mDecType = TheBoolTypeDeclaration;
 		return ex;
 	}
+}
+
+void Expression::ReplaceVariable(Declaration* pvar, Declaration* nvar)
+{
+	if (mLeft) mLeft->ReplaceVariable(pvar, nvar);
+	if (mRight) mRight->ReplaceVariable(pvar, nvar);
+
+	if (mType == EX_VARIABLE && mDecValue == pvar)
+		mDecValue = nvar;
+}
+
+Expression* Expression::ToVarConst(Declaration* pvar, Declaration* pconst) const
+{
+	if (mType == EX_VARIABLE && mDecValue == pvar)
+	{
+		Expression* exp = new Expression(mLocation, EX_CONSTANT);
+		exp->mDecType = mDecType;
+		exp->mDecValue = pconst;
+		exp->mConst = true;
+		return exp;
+	}
+	else
+	{
+		Expression* exp = new Expression(mLocation, mType);
+		exp->mToken = mToken;
+		exp->mDecType = mDecType;
+		exp->mDecValue = mDecValue;
+		exp->mConst = mConst;
+		if (mLeft) exp->mLeft = mLeft->ToVarConst(pvar, pconst);
+		if (mRight) exp->mRight = mRight->ToVarConst(pvar, pconst);
+		return exp;
+	}
+}
+
+Expression* Expression::Clone(void) const
+{
+	Expression* exp = new Expression(mLocation, mType);
+	exp->mToken = mToken;
+	exp->mDecType = mDecType;
+	exp->mDecValue = mDecValue;
+	exp->mConst = mConst;
+	if (mLeft) exp->mLeft = mLeft->Clone();
+	if (mRight) exp->mRight = mRight->Clone();
+	return exp;
 }
 
 Expression* Expression::ToAlternateThis(Declaration* pthis, Declaration* nthis)
@@ -898,11 +956,19 @@ Expression* Expression::ConstantFold(Errors * errors, LinkerSection * dataSectio
 		{
 			int64	ival = 0, ileft = mLeft->mDecValue->mInteger, iright = mRight->mDecValue->mInteger;
 
-			bool	signop =
-				(mLeft->mDecValue->mBase->mSize < 2 || (mLeft->mDecValue->mBase->mFlags & DTF_SIGNED)) &&
-				(mRight->mDecValue->mBase->mSize < 2 || (mRight->mDecValue->mBase->mFlags & DTF_SIGNED));
+			Declaration* dtype = TheSignedIntTypeDeclaration;
+			if (mLeft->mDecValue->mBase->mSize > mRight->mDecValue->mBase->mSize)
+				dtype = mLeft->mDecValue->mBase;
+			else if (mLeft->mDecValue->mBase->mSize < mRight->mDecValue->mBase->mSize)
+				dtype = mRight->mDecValue->mBase;
+			else if (mLeft->mDecValue->mBase->mSize > 1)
+			{
+				if ((mLeft->mDecValue->mBase->mFlags & DTF_SIGNED) && !(mRight->mDecValue->mBase->mFlags & DTF_SIGNED))
+					dtype = mRight->mDecValue->mBase;
+				else
+					dtype = mLeft->mDecValue->mBase;
+			}
 
-			bool	promote = true;
 			switch (mToken)
 			{
 			case TK_ADD:
@@ -916,27 +982,25 @@ Expression* Expression::ConstantFold(Errors * errors, LinkerSection * dataSectio
 				break;
 			case TK_DIV:
 				if (iright == 0)
-					errors->Error(mLocation, EERR_INVALID_VALUE, "Constant division by zero");
-				else if (signop)
+					return this;
+				else if (dtype->mFlags & DTF_SIGNED)
 					ival = ileft / iright;
 				else
 					ival = (uint64)ileft / (uint64)iright;
 				break;
 			case TK_MOD:
 				if (iright == 0)
-					errors->Error(mLocation, EERR_INVALID_VALUE, "Constant division by zero");
-				else if (signop)
+					return this;
+				else if (dtype->mFlags & DTF_SIGNED)
 					ival = ileft % iright;
 				else
 					ival = (uint64)ileft % (uint64)iright;
 				break;
 			case TK_LEFT_SHIFT:
 				ival = ileft << iright;
-				promote = false;
 				break;
 			case TK_RIGHT_SHIFT:
 				ival = ileft >> iright;
-				promote = false;
 				break;
 			case TK_BINARY_AND:
 				ival = ileft & iright;
@@ -953,29 +1017,14 @@ Expression* Expression::ConstantFold(Errors * errors, LinkerSection * dataSectio
 
 			Expression* ex = new Expression(mLocation, EX_CONSTANT);
 			Declaration* dec = new Declaration(mLocation, DT_CONST_INTEGER);
-			if (promote)
-			{
-				if (mLeft->mDecValue->mBase->mSize <= 2 && mRight->mDecValue->mBase->mSize <= 2)
-					dec->mBase = ival < 32768 ? TheSignedIntTypeDeclaration : TheUnsignedIntTypeDeclaration;
-				else
-					dec->mBase = ival < 2147483648 ? TheSignedLongTypeDeclaration : TheUnsignedLongTypeDeclaration;
-			}
-			else
-			{
-				if (mLeft->mDecValue->mBase->mSize < 2)
-					dec->mBase = TheSignedIntTypeDeclaration;
-				else
-					dec->mBase = mLeft->mDecValue->mBase;
-			}
-
-			dec->mInteger = ival;
+			dec->mBase = dtype;
+			dec->mInteger = signextend(ival, dec->mBase);
 			ex->mDecValue = dec;
 			ex->mDecType = dec->mBase;
 			return ex;
 		}
 		else if ((mLeft->mDecValue->mType == DT_CONST_INTEGER || mLeft->mDecValue->mType == DT_CONST_FLOAT) && (mRight->mDecValue->mType == DT_CONST_INTEGER || mRight->mDecValue->mType == DT_CONST_FLOAT))
 		{
-
 			double	dval;
 			double	dleft = mLeft->mDecValue->mType == DT_CONST_INTEGER ? mLeft->mDecValue->mInteger : mLeft->mDecValue->mNumber;
 			double	dright = mRight->mDecValue->mType == DT_CONST_INTEGER ? mRight->mDecValue->mInteger : mRight->mDecValue->mNumber;
@@ -1029,6 +1078,20 @@ Expression* Expression::ConstantFold(Errors * errors, LinkerSection * dataSectio
 			ex->mDecValue = dec;
 			ex->mDecType = dec->mBase;
 			return ex;
+		}
+		else if (mLeft->mDecValue->mType == DT_CONST_ADDRESS && mRight->mDecValue->mType == DT_CONST_ADDRESS && mToken == TK_SUB)
+		{
+			if (mLeft->mDecType->mType == DT_TYPE_POINTER && mRight->mDecType->mType == DT_TYPE_POINTER &&
+				mLeft->mDecType->mBase->IsConstSame(mRight->mDecType->mBase))
+			{
+				Expression* ex = new Expression(mLocation, EX_CONSTANT);
+				Declaration* dec = new Declaration(mLocation, DT_CONST_INTEGER);
+				dec->mBase = TheSignedIntTypeDeclaration;
+				dec->mInteger = (mLeft->mDecValue->mInteger - mRight->mDecValue->mInteger) / mLeft->mDecType->mBase->mSize;
+				ex->mDecValue = dec;
+				ex->mDecType = dec->mBase;
+				return ex;
+			}
 		}
 #if 0
 		else if (mLeft->mDecValue->mType == DT_CONST_POINTER && mRight->mDecValue->mType == DT_CONST_INTEGER && (mToken == TK_ADD || mToken == TK_SUB))
@@ -1165,7 +1228,7 @@ Expression* Expression::ConstantFold(Errors * errors, LinkerSection * dataSectio
 		return ex;
 	}
 	else if (mType == EX_BINARY && mToken == TK_ADD && mLeft->mType == EX_VARIABLE && mLeft->mDecValue->mType == DT_VARIABLE && (mLeft->mDecValue->mFlags & DTF_CONST) && 
-		mLeft->mDecValue && mRight->mDecValue && mLeft->mDecValue->mValue->mType == EX_CONSTANT &&
+		mLeft->mDecValue && mRight->mDecValue && mLeft->mDecValue->mValue && mLeft->mDecValue->mValue->mType == EX_CONSTANT &&
 		mLeft->mDecType->mType == DT_TYPE_POINTER && mRight->mType == EX_CONSTANT && mRight->mDecValue->mType == DT_CONST_INTEGER)
 	{
 		mLeft = mLeft->mDecValue->mValue;
@@ -1218,19 +1281,23 @@ Expression* Expression::ConstantFold(Errors * errors, LinkerSection * dataSectio
 	else if (mType == EX_INDEX && mLeft->mType == EX_VARIABLE && mLeft->mDecValue->mType == DT_VARIABLE_REF && (mLeft->mDecValue->mFlags & DTF_GLOBAL) &&
 		mLeft->mDecType->mType == DT_TYPE_ARRAY && mLeft->mDecType->mStride == 0 &&
 		mRight->mType == EX_CONSTANT && mRight->mDecValue->mType == DT_CONST_INTEGER)
-		{
-			int offset = mLeft->mDecValue->mOffset + int(mDecType->mSize * mRight->mDecValue->mInteger);
+	{
+		int offset = mLeft->mDecValue->mOffset + int(mDecType->mSize * mRight->mDecValue->mInteger);
 
-			Expression* ex = new Expression(mLocation, EX_VARIABLE);
-			Declaration* dec = new Declaration(mLocation, DT_VARIABLE_REF);
-			dec->mFlags = mLeft->mDecValue->mFlags;
-			dec->mBase = mLeft->mDecValue->mBase;
-			dec->mOffset = offset;
-			dec->mSize = mDecType->mSize;
-			ex->mDecValue = dec;
-			ex->mDecType = mDecType;
-			return ex;
-			}
+		Expression* ex = new Expression(mLocation, EX_VARIABLE);
+		Declaration* dec = new Declaration(mLocation, DT_VARIABLE_REF);
+		dec->mFlags = mLeft->mDecValue->mFlags;
+		dec->mBase = mLeft->mDecValue->mBase;
+		dec->mOffset = offset;
+		dec->mSize = mDecType->mSize;
+		ex->mDecValue = dec;
+		ex->mDecType = mDecType;
+		return ex;
+	}
+	else if (mType == EX_VARIABLE && mDecType->IsSimpleType() && (mDecValue->mFlags & DTF_CONST) && mDecValue->mValue && mDecValue->mValue->mType == EX_INITIALIZATION && mDecValue->mValue->mRight->mType == EX_CONSTANT)
+	{
+		return mDecValue->mValue->mRight;
+	}
 	else if (mType == EX_CALL && mLeft->mType == EX_CONSTANT && (mLeft->mDecValue->mFlags & DTF_INTRINSIC) && mRight && mRight->mType == EX_CONSTANT)
 	{
 		Declaration* decf = mLeft->mDecValue, * decp = mRight->mDecValue;
@@ -1239,6 +1306,7 @@ Expression* Expression::ConstantFold(Errors * errors, LinkerSection * dataSectio
 		if (decp->mType == DT_CONST_FLOAT || decp->mType == DT_CONST_INTEGER)
 		{
 			double d = decp->mType == DT_CONST_FLOAT ? decp->mNumber : decp->mInteger;
+			double e = 0.0;
 
 			bool	check = false;
 
@@ -1258,6 +1326,10 @@ Expression* Expression::ConstantFold(Errors * errors, LinkerSection * dataSectio
 				d = log(d);
 			else if (!strcmp(iname->mString, "exp"))
 				d = exp(d);
+			else if (!strcmp(iname->mString, "sqrt"))
+				d = sqrt(d);
+			else if (!strcmp(iname->mString, "atan"))
+				d = atan(d);
 			else
 				return this;
 
@@ -1265,6 +1337,36 @@ Expression* Expression::ConstantFold(Errors * errors, LinkerSection * dataSectio
 			Declaration* dec = new Declaration(mLocation, DT_CONST_FLOAT);
 			dec->mBase = TheFloatTypeDeclaration;
 			dec->mNumber = d;
+			ex->mDecValue = dec;
+			ex->mDecType = dec->mBase;
+			return ex;
+		}
+	}
+	else if (mType == EX_CALL && mLeft->mType == EX_CONSTANT && (mLeft->mDecValue->mFlags & DTF_INTRINSIC) && mRight && 
+		mRight->mType == EX_LIST && mRight->mLeft->mType == EX_CONSTANT && mRight->mRight->mType == EX_CONSTANT)
+	{
+		Declaration* decf = mLeft->mDecValue, * decp1 = mRight->mLeft->mDecValue, * decp2 = mRight->mRight->mDecValue;
+		const Ident* iname = decf->mQualIdent;
+
+		if ((decp1->mType == DT_CONST_FLOAT || decp1->mType == DT_CONST_INTEGER) &&
+			(decp2->mType == DT_CONST_FLOAT || decp2->mType == DT_CONST_INTEGER))
+		{
+			double d1 = decp1->mType == DT_CONST_FLOAT ? decp1->mNumber : decp1->mInteger;
+			double d2 = decp2->mType == DT_CONST_FLOAT ? decp2->mNumber : decp2->mInteger;
+
+			bool	check = false;
+
+			if (!strcmp(iname->mString, "pow"))
+				d1 = pow(d1, d2);
+			else if (!strcmp(iname->mString, "atan2"))
+				d1 = atan2(d1, d2);
+			else
+				return this;
+
+			Expression* ex = new Expression(mLocation, EX_CONSTANT);
+			Declaration* dec = new Declaration(mLocation, DT_CONST_FLOAT);
+			dec->mBase = TheFloatTypeDeclaration;
+			dec->mNumber = d1;
 			ex->mDecValue = dec;
 			ex->mDecType = dec->mBase;
 			return ex;
@@ -1291,12 +1393,16 @@ Declaration::Declaration(const Location& loc, DecType type)
 	: mLocation(loc), mEndLocation(loc), mType(type), mScope(nullptr), mData(nullptr), mIdent(nullptr), mQualIdent(nullptr), mMangleIdent(nullptr),
 	mSize(0), mOffset(0), mFlags(0), mComplexity(0), mLocalSize(0), mNumVars(0),
 	mBase(nullptr), mParams(nullptr), mParamPack(nullptr), mValue(nullptr), mReturn(nullptr), mNext(nullptr), mPrev(nullptr),
-	mConst(nullptr), mMutable(nullptr), mVolatile(nullptr),
+	mConst(nullptr), mMutable(nullptr), mVolatile(nullptr), mClass(nullptr),
 	mDefaultConstructor(nullptr), mDestructor(nullptr), mCopyConstructor(nullptr), mCopyAssignment(nullptr), mMoveConstructor(nullptr), mMoveAssignment(nullptr),
 	mVectorConstructor(nullptr), mVectorDestructor(nullptr), mVectorCopyConstructor(nullptr), mVectorCopyAssignment(nullptr),
+	mVectorMoveConstructor(nullptr), mVectorMoveAssignment(nullptr),
 	mVTable(nullptr), mTemplate(nullptr), mForwardParam(nullptr), mForwardCall(nullptr),
 	mVarIndex(-1), mLinkerObject(nullptr), mCallers(nullptr), mCalled(nullptr), mAlignment(1), mFriends(nullptr),
-	mInteger(0), mNumber(0), mMinValue(-0x80000000LL), mMaxValue(0x7fffffffLL), mFastCallBase(0), mFastCallSize(0), mStride(0), mStripe(1),
+	mInteger(0), mNumber(0), mMinValue(-0x80000000LL), mMaxValue(0x7fffffffLL), 
+	mFastCallBase(0), mFastCallSize(0), 
+	mFastCallBase2(0), mFastCallSize2(0), mVariadicSize(0),
+	mStride(0), mStripe(1),
 	mCompilerOptions(0), mUseCount(0), mTokens(nullptr), mParser(nullptr),
 	mShift(0), mBits(0), mOptFlags(0), mInlayRegion(nullptr),
 	mReferences(nullptr)
@@ -1395,6 +1501,33 @@ bool Declaration::IsNullConst(void) const
 		return false;
 }
 
+int64 Declaration::MinInteger(void) const
+{
+	if (mFlags & DTF_SIGNED)
+		return -int64(1ULL << (8 * mSize - 1));
+	else
+		return 0;
+}
+
+int64 Declaration::MaxInteger(void) const
+{
+	if (mFlags & DTF_SIGNED)
+		return (1ULL << (8 * mSize - 1)) - 1;
+	else
+		return (1ULL << (8 * mSize)) - 1;
+}
+
+int64 Declaration::CastInteger(int64 v) const
+{
+	v &= (1ULL << (8 * mSize)) - 1;
+	if (mFlags & DTF_SIGNED)
+	{
+		if (v & (1ULL << (8 * mSize - 1)))
+			v -= 1ULL << (8 * mSize);
+	}
+	return v;
+}
+
 Declaration* Declaration::ConstCast(Declaration* ntype)
 {
 	if (ntype == mBase)
@@ -1418,6 +1551,52 @@ Declaration* Declaration::ConstCast(Declaration* ntype)
 			pdec->mSize = 2;
 			return pdec;
 		}
+		else if (mType == DT_VARIABLE && mBase->mType == DT_TYPE_ARRAY)
+		{
+			Expression* ex = new Expression(mLocation, EX_VARIABLE);
+			ex->mDecType = mBase;
+			ex->mDecValue = this;
+
+			Declaration* pdec = this->Clone();
+			pdec->mType = DT_CONST_POINTER;
+			pdec->mValue = ex;
+			pdec->mBase = ntype;
+			pdec->mSize = 2;
+
+			return pdec;
+		}
+		else if (mType == DT_VARIABLE_REF)
+		{
+			Declaration* vtype = mBase->mBase;
+			while (vtype && vtype->mType == DT_TYPE_STRUCT)
+			{
+				Declaration* dec = vtype->mParams;
+				while (dec && dec->mOffset != mOffset)
+					dec = dec->mNext;
+				if (dec)
+					vtype = dec->mBase;
+				else
+					vtype = nullptr;
+			}
+
+			if (vtype && vtype->mType == DT_TYPE_ARRAY)
+			{
+				Expression* ex = new Expression(mLocation, EX_VARIABLE);
+				ex->mDecType = mBase->mBase;
+				ex->mDecValue = this;
+
+				Declaration* pdec = this->Clone();
+				pdec->mType = DT_CONST_POINTER;
+				pdec->mValue = ex;
+				pdec->mBase = ntype;
+				pdec->mSize = 2;
+				pdec->mOffset = 0;
+
+				return pdec;
+			}
+			else
+				return this;
+		}
 		else
 			return this;
 	}
@@ -1437,6 +1616,19 @@ Declaration* Declaration::ConstCast(Declaration* ntype)
 			Declaration* pdec = this->Clone();
 			pdec->mBase = ntype;
 			pdec->mSize = ntype->mSize;
+
+			pdec->mInteger &= (1ULL << (8 * mBase->mSize)) - 1;
+			if (mBase->mFlags & DTF_SIGNED)
+			{
+				if (pdec->mInteger >= 1LL << (8 * mBase->mSize - 1))
+					pdec->mInteger -= 1LL << (8 * mBase->mSize);
+			}
+			pdec->mInteger &= (1ULL << (8 * pdec->mBase->mSize)) - 1;
+			if (pdec->mBase->mFlags & DTF_SIGNED)
+			{
+				if (pdec->mInteger >= 1LL << (8 * pdec->mBase->mSize - 1))
+					pdec->mInteger -= 1LL << (8 * pdec->mBase->mSize);
+			}
 			return pdec;
 		}
 	}
@@ -1525,6 +1717,26 @@ Declaration* Declaration::DeduceAuto(Declaration * dec)
 		return this;
 }
 
+Declaration* Declaration::DeduceAutoInit(Declaration* dec)
+{
+	if (mType == DT_TYPE_AUTO || IsReference() && mBase->mType == DT_TYPE_AUTO)
+	{
+		dec = dec->NonRefBase();
+
+		if ((IsReference() ? mBase->mFlags : mFlags) & DTF_CONST)
+			dec = dec->ToConstType();
+		else
+			dec = dec->ToMutableType();
+
+		if (IsReference())
+			dec = dec->BuildReference(mLocation, mType);
+
+		return dec;
+	}
+	else
+		return this;
+}
+
 
 Declaration* Declaration::BuildConstRValueRef(const Location& loc)
 {
@@ -1563,7 +1775,9 @@ const Ident* Declaration::FullIdent(void)
 		Declaration* dec = mBase->mParams;
 		while (dec)
 		{
-			tident = tident->Mangle(dec->mBase->MangleIdent()->mString);
+			const Ident* mident = dec->mBase->MangleIdent();
+			if (mident)
+				tident = tident->Mangle(mident->mString);
 			dec = dec->mNext;
 			if (dec)
 				tident = tident->Mangle(",");
@@ -1699,25 +1913,30 @@ const Ident* Declaration::MangleIdent(void)
 					}
 
 					dec = dec->mNext;
-					if (dec)
+					if (mMangleIdent && dec)
 						mMangleIdent = mMangleIdent->Mangle(",");
 				}
 			}
 			else
 				mMangleIdent = Ident::Unique("void");
 		}
-		else
+		else if (mQualIdent)
 			mMangleIdent = mQualIdent;
+		else
+			mMangleIdent = mIdent;
 
 		if (mTemplate)
 		{
 
 		}
 
-		if (mFlags & DTF_CONST)
-			mMangleIdent = mMangleIdent->PreMangle("const ");
-		if (mFlags & DTF_VOLATILE)
-			mMangleIdent = mMangleIdent->PreMangle("volatile ");
+		if (mMangleIdent)
+		{
+			if (mFlags & DTF_CONST)
+				mMangleIdent = mMangleIdent->PreMangle("const ");
+			if (mFlags & DTF_VOLATILE)
+				mMangleIdent = mMangleIdent->PreMangle("volatile ");
+		}
 	}
 
 	return mMangleIdent;
@@ -1778,19 +1997,8 @@ Declaration* Declaration::ExpandTemplate(DeclarationScope* scope)
 	return this;
 }
 
-bool Declaration::ResolveTemplate(Expression* pexp, Declaration* tdec)
+bool Declaration::ResolveTemplateParameterList(Expression* pexp, Declaration* pdec, bool preliminary)
 {
-	Declaration* pdec = tdec->mBase->mParams;
-
-	// Insert partially resolved templates
-	Declaration* ptdec = tdec->mTemplate->mParams;
-	while (ptdec)
-	{
-		if (ptdec->mBase)
-			mScope->Insert(ptdec->mIdent, ptdec->mBase);
-		ptdec = ptdec->mNext;
-	}
-
 	Declaration* phead = nullptr, * ptail = nullptr;
 	int	pcnt = 0;
 
@@ -1826,7 +2034,7 @@ bool Declaration::ResolveTemplate(Expression* pexp, Declaration* tdec)
 			}
 			else
 			{
-				if (!ResolveTemplate(ex->mDecType, pdec->mBase))
+				if (!ResolveTemplate(ex->mDecType, pdec->mBase, false, preliminary))
 					return false;
 
 				pdec = pdec->mNext;
@@ -1840,6 +2048,9 @@ bool Declaration::ResolveTemplate(Expression* pexp, Declaration* tdec)
 	{
 		if (pdec->mType == DT_PACK_ARGUMENT)
 		{
+			if (preliminary)
+				return true;
+
 			Declaration* tpdec = new Declaration(pdec->mLocation, DT_PACK_TYPE);
 			if (pdec->mBase->mType == DT_TYPE_REFERENCE)
 				tpdec->mIdent = pdec->mBase->mBase->mIdent;
@@ -1852,6 +2063,25 @@ bool Declaration::ResolveTemplate(Expression* pexp, Declaration* tdec)
 		else
 			return false;
 	}
+
+	return true;
+}
+
+bool Declaration::ResolveTemplate(Expression* pexp, Declaration* tdec)
+{
+	Declaration* pdec = tdec->mBase->mParams;
+
+	// Insert partially resolved templates
+	Declaration* ptdec = tdec->mTemplate->mParams;
+	while (ptdec)
+	{
+		if (ptdec->mBase)
+			mScope->Insert(ptdec->mIdent, ptdec->mBase);
+		ptdec = ptdec->mNext;
+	}
+
+	if (!ResolveTemplateParameterList(pexp, pdec, true) || !ResolveTemplateParameterList(pexp, pdec, false))
+		return false;
 
 	Declaration* ppdec = nullptr;
 	ptdec = tdec->mTemplate->mParams;
@@ -1895,7 +2125,7 @@ bool Declaration::CanResolveTemplate(Expression* pexp, Declaration* tdec)
 
 		if (pdec)
 		{
-			if (!ResolveTemplate(ex->mDecType, pdec->mBase))
+			if (!ResolveTemplate(ex->mDecType, pdec->mBase, false, false))
 				return false;
 
 			if (pdec->mType != DT_PACK_ARGUMENT)
@@ -1911,19 +2141,19 @@ bool Declaration::CanResolveTemplate(Expression* pexp, Declaration* tdec)
 		return true;
 }
 
-bool Declaration::ResolveTemplate(Declaration* fdec, Declaration* tdec)
+bool Declaration::ResolveTemplate(Declaration* fdec, Declaration* tdec, bool same, bool preliminary)
 {
 	if (tdec->IsSame(fdec))
 		return true;
 	else if (fdec->IsReference())
-		return ResolveTemplate(fdec->mBase, tdec);
+		return ResolveTemplate(fdec->mBase, tdec, same, preliminary);
 	else if (tdec->mType == DT_TYPE_FUNCTION)
 	{
 		if (fdec->mType == DT_TYPE_FUNCTION)
 		{
 			if (fdec->mBase)
 			{
-				if (!tdec->mBase || !ResolveTemplate(fdec->mBase, tdec->mBase))
+				if (!tdec->mBase || !ResolveTemplate(fdec->mBase, tdec->mBase, true, preliminary))
 					return false;
 			}
 			else if (tdec->mBase)
@@ -1962,7 +2192,7 @@ bool Declaration::ResolveTemplate(Declaration* fdec, Declaration* tdec)
 				if (!fpdec)
 					return false;
 
-				if (!ResolveTemplate(fpdec->mBase, tpdec->mBase))
+				if (!ResolveTemplate(fpdec->mBase, tpdec->mBase, true, preliminary))
 					return false;
 
 				fpdec = fpdec->mNext;
@@ -1978,16 +2208,16 @@ bool Declaration::ResolveTemplate(Declaration* fdec, Declaration* tdec)
 	}
 	else if (tdec->mType == DT_TYPE_REFERENCE)
 	{
-		return ResolveTemplate(fdec, tdec->mBase);
+		return ResolveTemplate(fdec, tdec->mBase, true, preliminary);
 	}
 	else if (tdec->mType == DT_TYPE_RVALUEREF)
 	{
-		return ResolveTemplate(fdec, tdec->mBase);
+		return ResolveTemplate(fdec, tdec->mBase, true, preliminary);
 	}
 	else if (tdec->mType == DT_TYPE_POINTER)
 	{
 		if (fdec->mType == DT_TYPE_POINTER || fdec->mType == DT_TYPE_ARRAY)
-			return ResolveTemplate(fdec->mBase, tdec->mBase);
+			return ResolveTemplate(fdec->mBase, tdec->mBase, true, preliminary);
 		else
 			return false;
 	}
@@ -2007,10 +2237,12 @@ bool Declaration::ResolveTemplate(Declaration* fdec, Declaration* tdec)
 			if (pdec->mType == DT_TYPE_STRUCT)
 				pdec = pdec->mScope->Lookup(tdec->mIdent);
 		}
+		else if (preliminary && !same)
+			return true;
 		else
 			pdec = mScope->Insert(tdec->mIdent, fdec);
 
-		if (pdec && !pdec->IsSame(fdec))
+		if (pdec && !(same ? pdec->IsSame(fdec) : pdec->CanAssign(fdec)))
 			return false;
 
 		return true;
@@ -2051,6 +2283,21 @@ bool Declaration::ResolveTemplate(Declaration* fdec, Declaration* tdec)
 		}
 
 		return true;
+	}
+	else if (tdec->mType == DT_TYPE_ARRAY && fdec->mType == DT_TYPE_ARRAY && tdec->mTemplate && tdec->mBase->IsConstSame(fdec->mBase))
+	{
+		Declaration* ifdec = new Declaration(fdec->mLocation, DT_CONST_INTEGER);
+		ifdec->mBase = TheSignedIntTypeDeclaration;
+		ifdec->mSize = 2;
+		ifdec->mInteger = fdec->mSize / fdec->mBase->mSize;
+
+		Declaration * ipdec = mScope->Insert(tdec->mTemplate->mIdent, ifdec);
+		if (ipdec && !ipdec->IsSame(ifdec))
+			return false;
+
+		return true;
+
+
 	}
 	else if (tdec->mType == DT_TYPE_STRUCT && fdec->mType == DT_TYPE_STRUCT && tdec->mTemplate)
 	{
@@ -2116,13 +2363,27 @@ bool Declaration::ResolveTemplate(Declaration* fdec, Declaration* tdec)
 					tpdec = tpdec->mNext;
 				}
 
-				return !fpdec && !tpdec;
+				if (fpdec)
+					return false;
+				else if (!tpdec)
+					return true;
+				else if (tpdec->mBase->mType == DT_PACK_TEMPLATE)
+				{
+					Declaration*tppack = new Declaration(tpdec->mLocation, DT_PACK_TYPE);
+					Declaration* pdec = mScope->Insert(tpdec->mBase->mIdent, tppack);
+
+					return true;
+				}
+				else
+					return false;
 			}
 			
 			ftdec = ftdec->mNext;
 		}
 		return false;
 	}
+	else if (!same && tdec->CanAssign(fdec))
+		return true;
 	else
 		return tdec->IsSame(fdec);
 }
@@ -2136,6 +2397,7 @@ Declaration* Declaration::Clone(void)
 	ndec->mStride = mStride;
 	ndec->mStripe = mStripe;
 	ndec->mBits = mBits;
+	ndec->mShift = mShift;
 	ndec->mBase = mBase;
 	ndec->mFlags = mFlags;
 	ndec->mScope = mScope;
@@ -2208,6 +2470,7 @@ Declaration* Declaration::ToStriped(int stripe)
 	ndec->mStride = mStride;
 	ndec->mStripe = stripe;
 	ndec->mBits = mBits;
+	ndec->mShift = mShift;
 	ndec->mFlags = mFlags;
 	ndec->mIdent = mIdent;
 	ndec->mQualIdent = mQualIdent;
@@ -2252,6 +2515,7 @@ Declaration* Declaration::ToStriped(int stripe)
 		ndec->mVectorConstructor = mVectorConstructor ? mVectorConstructor->ToAlternateThis(pndec, 2) : nullptr;
 		ndec->mVectorDestructor = mVectorDestructor ? mVectorDestructor->ToAlternateThis(pndec, 2) : nullptr;
 		ndec->mVectorCopyConstructor = mVectorCopyConstructor ? mVectorCopyConstructor->ToAlternateThis(pndec, 2) : nullptr;
+		ndec->mVectorMoveConstructor = mVectorMoveConstructor ? mVectorMoveConstructor->ToAlternateThis(pndec, 2) : nullptr;
 	}
 	else if (mType == DT_TYPE_FUNCTION)
 	{
@@ -2283,6 +2547,7 @@ Declaration* Declaration::ToVolatileType(void)
 		ndec->mStride = mStride;
 		ndec->mBase = mBase;
 		ndec->mBits = mBits;
+		ndec->mShift = mShift;
 		ndec->mFlags = mFlags | DTF_VOLATILE;
 		ndec->mScope = mScope;
 		ndec->mParams = mParams;
@@ -2318,6 +2583,7 @@ Declaration* Declaration::ToVolatileType(void)
 		ndec->mVectorConstructor = mVectorConstructor;
 		ndec->mVectorDestructor = mVectorDestructor;
 		ndec->mVectorCopyConstructor = mVectorCopyConstructor;
+		ndec->mVectorMoveConstructor = mVectorMoveConstructor;
 		ndec->mVTable = mVTable;
 
 		mVolatile = ndec;
@@ -2337,8 +2603,12 @@ Declaration* Declaration::ToConstType(void)
 		ndec->mSize = mSize;
 		ndec->mStride = mStride;
 		ndec->mStripe = mStripe;
-		ndec->mBase = mBase;
+		if (mType == DT_TYPE_ARRAY)
+			ndec->mBase = mBase->ToConstType();
+		else
+			ndec->mBase = mBase;
 		ndec->mBits = mBits;
+		ndec->mShift = mShift;
 		ndec->mFlags = mFlags | DTF_CONST;
 		ndec->mScope = mScope;
 		ndec->mParams = mParams;
@@ -2353,6 +2623,7 @@ Declaration* Declaration::ToConstType(void)
 		ndec->mVectorConstructor = mVectorConstructor;
 		ndec->mVectorDestructor = mVectorDestructor;
 		ndec->mVectorCopyConstructor = mVectorCopyConstructor;
+		ndec->mVectorMoveConstructor = mVectorMoveConstructor;
 		ndec->mVTable = mVTable;
 
 		ndec->mMutable = this;
@@ -2404,7 +2675,8 @@ Declaration* Declaration::ToMutableType(void)
 		ndec->mStripe = mStripe;
 		ndec->mBase = mBase;
 		ndec->mBits = mBits;
-		ndec->mFlags = mFlags | DTF_CONST;
+		ndec->mShift = mShift;
+		ndec->mFlags = mFlags & ~DTF_CONST;
 		ndec->mScope = mScope;
 		ndec->mParams = mParams;
 		ndec->mIdent = mIdent;
@@ -2418,6 +2690,7 @@ Declaration* Declaration::ToMutableType(void)
 		ndec->mVectorConstructor = mVectorConstructor;
 		ndec->mVectorDestructor = mVectorDestructor;
 		ndec->mVectorCopyConstructor = mVectorCopyConstructor;
+		ndec->mVectorMoveConstructor = mVectorMoveConstructor;
 		ndec->mVTable = mVTable;
 
 		ndec->mConst = this;
@@ -2747,15 +3020,15 @@ bool Declaration::IsSame(const Declaration* dec) const
 	if (mType != dec->mType)
 		return false;
 
+	if ((mFlags & (DTF_SIGNED | DTF_CONST | DTF_VOLATILE)) != (dec->mFlags & (DTF_SIGNED | DTF_CONST | DTF_VOLATILE)))
+		return false;
+
 	if (!(mFlags & dec->mFlags & DTF_DEFINED) && mType == DT_TYPE_STRUCT)
 		return mIdent == dec->mIdent;
 
 	if (mSize != dec->mSize)
 		return false;
 	if (mStripe != dec->mStripe)
-		return false;
-
-	if ((mFlags & (DTF_SIGNED | DTF_CONST | DTF_VOLATILE)) != (dec->mFlags & (DTF_SIGNED | DTF_CONST | DTF_VOLATILE)))
 		return false;
 
 	if (mType == DT_CONST_INTEGER)
@@ -2782,7 +3055,7 @@ bool Declaration::IsSame(const Declaration* dec) const
 	else if (IsReference())
 		return mBase->IsSame(dec->mBase);
 	else if (mType == DT_TYPE_STRUCT)
-		return mScope == dec->mScope || (mIdent == dec->mIdent && mSize == dec->mSize);
+		return mScope == dec->mScope || (mQualIdent == dec->mQualIdent && mSize == dec->mSize);
 	else if (mType == DT_TYPE_FUNCTION)
 	{
 		if (!mBase->IsSame(dec->mBase))
@@ -2804,7 +3077,7 @@ bool Declaration::IsSame(const Declaration* dec) const
 
 		return true;
 	}
-	else if (mType == DT_TYPE_TEMPLATE)
+	else if (mType == DT_TYPE_TEMPLATE || mType == DT_PACK_TEMPLATE)
 	{
 		return mIdent == dec->mIdent;
 	}
@@ -2937,7 +3210,7 @@ bool Declaration::CanAssign(const Declaration* fromType) const
 		if (mScope == fromType->mScope || (mIdent == fromType->mIdent && mSize == fromType->mSize))
 			return true;
 		if (fromType->mBase)
-			return this->CanAssign(fromType->mBase);
+			return this->CanAssign(fromType->mBase->mBase);
 		return false;
 	}
 	else if (mType == DT_TYPE_ARRAY && fromType->mType == DT_TYPE_ARRAY)
@@ -2983,6 +3256,11 @@ bool Declaration::CanAssign(const Declaration* fromType) const
 	return false;
 }
 
+bool Declaration::IsPointerType(void) const
+{
+	return mType == DT_TYPE_ARRAY || mType == DT_TYPE_POINTER;
+}
+
 bool Declaration::IsIntegerType(void) const
 {
 	return mType == DT_TYPE_INTEGER || mType == DT_TYPE_BOOL || mType == DT_TYPE_ENUM;
@@ -3004,6 +3282,52 @@ bool Declaration::IsIndexed(void) const
 	return mType == DT_TYPE_ARRAY || mType == DT_TYPE_POINTER;
 }
 
+bool Declaration::ContainsArray(void) const
+{
+	if (mType == DT_TYPE_ARRAY)
+		return true;
+	else if (mType == DT_TYPE_STRUCT)
+	{
+		Declaration* p = mParams;
+		while (p)
+		{
+			if (p->mType == DT_ELEMENT && p->mBase->ContainsArray())
+				return true;
+			p = p->mNext;
+		}
+	}
+	return false;
+}
+
+bool Declaration::IsShortIntStruct(void) const
+{
+	if (mType == DT_TYPE_STRUCT && mSize <= 4 && !mDestructor && !mCopyConstructor)
+	{
+		Declaration* em = mParams;
+		while (em)
+		{
+			if (em->mType == DT_ELEMENT && em->mBase->IsIntegerType() && em->mBits == 0)
+				em = em->mNext;
+			else
+				return false;
+		}
+
+//		if (strcmp(mIdent->mString, "connection")) return false;
+		return true;
+	}
+
+	return false;
+}
+
+bool Declaration::HasConstructor(void) const
+{
+	return mType == DT_TYPE_STRUCT && mScope && mScope->Lookup(mIdent->PreMangle("+"));
+}
+
+bool Declaration::IsComplexStruct(void) const
+{
+	return mType == DT_TYPE_STRUCT && !IsShortIntStruct();
+}
 
 bool Declaration::IsSimpleType(void) const
 {
@@ -3023,6 +3347,7 @@ Declaration* TheVoidFunctionTypeDeclaration, * TheConstVoidValueDeclaration;
 Declaration* TheCharPointerTypeDeclaration, * TheConstCharPointerTypeDeclaration;
 Expression* TheVoidExpression;
 Declaration* TheNullptrConstDeclaration, * TheZeroIntegerConstDeclaration, * TheZeroFloatConstDeclaration, * TheNullPointerTypeDeclaration;
+Declaration* TheTrueConstDeclaration, * TheFalseConstDeclaration;
 
 void InitDeclarations(void)
 {
@@ -3124,4 +3449,13 @@ void InitDeclarations(void)
 	TheZeroFloatConstDeclaration->mBase = TheFloatTypeDeclaration;
 	TheZeroFloatConstDeclaration->mSize = 4;
 
+	TheTrueConstDeclaration = new Declaration(noloc, DT_CONST_INTEGER);
+	TheTrueConstDeclaration->mBase = TheBoolTypeDeclaration;
+	TheTrueConstDeclaration->mSize = 1;
+	TheTrueConstDeclaration->mInteger = 1;
+
+	TheFalseConstDeclaration = new Declaration(noloc, DT_CONST_INTEGER);
+	TheFalseConstDeclaration->mBase = TheBoolTypeDeclaration;
+	TheFalseConstDeclaration->mSize = 1;
+	TheFalseConstDeclaration->mInteger = 0;
 }

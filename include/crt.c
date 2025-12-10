@@ -411,6 +411,18 @@ __asm negtmp
 		rts
 }
 
+__asm negtmpb
+{
+		sec
+		lda	#0
+		sbc	tmp + 2
+		sta	tmp + 2
+		lda	#0
+		sbc	tmp + 3
+		sta	tmp + 3
+		rts
+}
+
 __asm negaccu32
 {
 		sec
@@ -444,6 +456,24 @@ __asm negtmp32
 		lda	#0
 		sbc	tmp + 3
 		sta	tmp + 3
+		rts
+}
+
+__asm negtmp32b
+{
+		sec
+		lda	#0
+		sbc	tmp + 4
+		sta	tmp + 4
+		lda	#0
+		sbc	tmp + 5
+		sta	tmp + 5
+		lda	#0
+		sbc	tmp + 6
+		sta	tmp + 6
+		lda	#0
+		sbc	tmp + 7
+		sta	tmp + 7
 		rts
 }
 
@@ -667,21 +697,19 @@ L1:		rol	accu
 		sbc	tmp + 1
 		lda	tmp + 6
 		sbc	tmp + 2
+		tax
 		lda	tmp + 7
 		sbc	tmp + 3
 		bcc	W1
+		stx tmp + 6
+		sta tmp + 7
 		lda	tmp + 4
 		sbc	tmp + 0
 		sta tmp + 4
 		lda	tmp + 5
 		sbc	tmp + 1
 		sta tmp + 5
-		lda	tmp + 6
-		sbc	tmp + 2
-		sta tmp + 6
-		lda	tmp + 7
-		sbc	tmp + 3
-		sta tmp + 7
+		sec
 W1:		dey
 		bne	L1
 		rol	accu
@@ -747,39 +775,64 @@ L4:
 
 __asm mul32by8
 {
+		ldy #0
+		sty tmp + 4
+		sty tmp + 5
+		sty tmp + 6
 
+		lsr
+		bcs W3
+		beq E0
+L1:
+		asl	accu
+		rol	accu + 1
+		rol	accu + 2
+		rol	accu + 3
+W2:
+		lsr
+		bcc L1
+W3:
+		tax
+		clc
+		lda	tmp + 4
+		adc	accu
+		sta	tmp + 4
+		lda	tmp + 5
+		adc	accu + 1
+		sta	tmp + 5
+		lda tmp + 6
+		adc	accu + 2
+		sta tmp + 6
+		tya
+		adc	accu + 3
+		tay
+		txa
+		bne L1
+E0:
+		sty tmp + 7
+		rts
 }
 
 __asm mul32
 {
-		lda	#0
-		sta	tmp + 4
-		sta	tmp + 5
-		sta	tmp + 6
-		sta	tmp + 7
+		lda tmp + 1
+		ora tmp + 2
+		ora tmp + 3
+		bne WW
+		lda tmp + 0
+		jmp mul32by8
+WW:
+		ldy #0
+		sty tmp + 4
+		sty tmp + 5
+		tya
 
-		lda	tmp + 0
-		jsr WM
-		lda	tmp + 1
-		jsr WM
-		lda	tmp + 2
-		jsr WM
-		lda	tmp + 3
-WM:
-		bne W0
-		ldx accu + 2
-		stx accu + 3
-		ldx accu + 1
-		stx accu + 2
-		ldx accu
-		stx accu + 1
-		sta accu
-		rts
-W0:
 		sec
-		ror
+		ror tmp + 0
+
 		bcc W1
-L1:		tax
+L1:
+		tax
 		clc
 		lda	tmp + 4
 		adc	accu
@@ -787,50 +840,52 @@ L1:		tax
 		lda	tmp + 5
 		adc	accu + 1
 		sta	tmp + 5
-		lda	tmp + 6
+		tya
 		adc	accu + 2
-		sta	tmp + 6
-		lda	tmp + 7
-		adc	accu + 3
-		sta	tmp + 7
+		tay
 		txa
-W1:		asl	accu
+		adc	accu + 3
+W1:
+		lsr tmp + 1
+		bcc W2
+		tax
+		clc
+		lda	tmp + 5
+		adc	accu + 0
+		sta	tmp + 5
+		tya
+		adc	accu + 1
+		tay
+		txa
+		adc	accu + 2
+W2:
+		lsr tmp + 2
+		bcc W3
+		tax
+		clc
+		tya
+		adc	accu + 0
+		tay
+		txa
+		adc	accu + 1
+W3:
+		lsr tmp + 3
+		bcc W4
+		clc
+		adc	accu + 0
+W4:
+		asl	accu
 		rol	accu + 1
 		rol	accu + 2
 		rol	accu + 3
-		lsr
+
+		lsr tmp + 0
 		bcc W1
 		bne L1
-		rts
 
-#if 0
-		ldx	#32
-L1:		lsr	tmp + 3
-		ror	tmp + 2
-		ror	tmp + 1
-		ror	tmp + 0
-		bcc	W1
-		clc
-		lda	tmp + 4
-		adc	accu
-		sta	tmp + 4
-		lda	tmp + 5
-		adc	accu + 1
-		sta	tmp + 5
-		lda	tmp + 6
-		adc	accu + 2
-		sta	tmp + 6
-		lda	tmp + 7
-		adc	accu + 3
-		sta	tmp + 7
-W1:		asl	accu
-		rol	accu + 1
-		rol	accu + 2
-		rol	accu + 3
-		dex
-		bne	L1
+		sty tmp + 6
+		sta tmp + 7		 
 		rts
-#endif
 }
 
 #if 1
@@ -933,21 +988,39 @@ __asm mods16
 		bpl	L1
 		jsr	negaccu
 		bit	tmp + 1
-		bpl	L2
+		bpl L2
 		jsr	negtmp
-L3:		jmp	divmod
+L2:		jsr	divmod
+		jmp negtmpb
 L1:		bit	tmp + 1
 		bpl	L3
 		jsr	negtmp
-L2:		jsr	divmod
-		sec
-		lda	#0
-		sbc	tmp + 2
-		sta	tmp + 2
-		lda	#0
-		sbc	tmp + 3
-		sta	tmp + 3
+L3:		jmp	divmod
 		rts
+}
+
+__asm divmods16
+{
+		bit	accu + 1
+		bmi	L1
+		bit	tmp + 1
+		bmi L2
+		jmp divmod
+L2:
+		jsr negtmp
+		jsr divmod
+		jmp	negaccu
+L1:
+		jsr negaccu
+		bit tmp + 3
+		bmi L3
+		jsr divmod
+		jsr negtmpb
+		jmp negaccu
+L3:
+		jsr negtmp
+		jsr divmod
+		jmp negtmpb
 }
 
 __asm divs32
@@ -974,25 +1047,38 @@ __asm mods32
 		bit	tmp + 3
 		bpl	L2
 		jsr	negtmp32
+L2:		jsr	divmod32
+		jmp negtmp32b
 L3:		jmp	divmod32
 L1:		bit	tmp + 3
 		bpl	L3
 		jsr	negtmp32
-L2:		jsr	divmod32
-		sec
-		lda	#0
-		sbc	tmp + 4
-		sta	tmp + 4
-		lda	#0
-		sbc	tmp + 5
-		sta	tmp + 5
-		lda	#0
-		sbc	tmp + 6
-		sta	tmp + 6
-		lda	#0
-		sbc	tmp + 7
-		sta	tmp + 7
-		rts
+		jmp	divmod32
+
+}
+
+__asm divmods32
+{
+		bit	accu + 3
+		bmi	L1
+		bit	tmp + 3
+		bmi L2
+		jmp divmod32
+L2:
+		jsr negtmp32
+		jsr divmod32
+		jmp	negaccu32
+L1:
+		jsr negaccu32
+		bit tmp + 3
+		bmi L3
+		jsr divmod32
+		jsr negtmp32b
+		jmp negaccu32
+L3:
+		jsr negtmp32
+		jsr divmod32
+		jmp negtmp32b
 }
 
 #pragma runtime(mul16, mul16);
@@ -1001,12 +1087,15 @@ L2:		jsr	divmod32
 #pragma runtime(modu16, divmod);
 #pragma runtime(divs16, divs16);
 #pragma runtime(mods16, mods16);
+#pragma runtime(divmods16, divmods16);
 		
 #pragma runtime(mul32, mul32);
+#pragma runtime(mul32by8, mul32by8);
 #pragma runtime(divu32, divmod32);
 #pragma runtime(modu32, divmod32);
 #pragma runtime(divs32, divs32);
 #pragma runtime(mods32, mods32);
+#pragma runtime(divmods32, divmods32);
 
 	
 
@@ -2053,23 +2142,23 @@ __asm inp_binop_modr_s16
 		bpl	L1
 		jsr	negaccu
 		bit	tmp + 1
-		bpl	L2
+		bpl	L3
 		jsr	negtmp
 L3:		jsr	divmod
 		lda	tmp + 2
 		sta	accu
 		lda	tmp + 3
 		sta	accu + 1
+		jsr	negaccu
 		jmp	startup.yexec		
 L1:		bit	tmp + 1
-		bpl	L3
+		bpl	L2
 		jsr	negtmp
 L2:		jsr	divmod
 		lda	tmp + 2
 		sta	accu
 		lda	tmp + 3
 		sta	accu + 1
-		jsr	negaccu
 		jmp	startup.yexec
 }
 
@@ -3509,7 +3598,7 @@ L1:
 		rol
 		bpl	L1
 W2:
-		and	#$7f
+		asl
 		sta	accu + 2
 		lda	accu
 		sta	accu + 1
@@ -3518,9 +3607,7 @@ W2:
 		sta	accu + 3
 		lda	#0
 		sta	accu
-		ror
-		ora	accu + 2
-		sta	accu + 2
+		ror	accu + 2
 		rts
 }
 
@@ -3668,7 +3755,7 @@ __asm f32_to_i16
 		sta	accu + 1
 		rts
 W1:
-		sec
+//		sec				// carry is set
 		sbc	#$8e
 		bcc	W2
 		bit	accu + 3
@@ -3686,9 +3773,10 @@ W5:
 		rts
 W2:
 		tax
+		lda accu + 1
 L1:
 		lsr	accu + 2
-		ror	accu + 1
+		ror
 		inx
 		bne	L1
 W3:
@@ -3696,15 +3784,14 @@ W3:
 		bpl	W4
 		
 		sec
-		lda	#0
-		sbc	accu + 1
+		eor #$ff
+		adc	#0
 		sta	accu
 		lda	#0
 		sbc	accu + 2
 		sta	accu + 1
 		rts
 W4:
-		lda	accu + 1
 		sta	accu
 		lda	accu + 2
 		sta	accu + 1
@@ -3726,32 +3813,34 @@ __asm f32_to_u16
 		cmp	#$7f
 		bcs	W1
 		lda	#0
+W0:
 		sta	accu
 		sta	accu + 1
 		rts
 W1:
-		sec
+//		sec				// carry is set
 		sbc	#$8e
-		beq	W2
 		bcc	W3
+		beq	W4
 		lda	#$ff
-		sta	accu
-		sta	accu + 1
-		rts
+		bne W0
 W3:
 		tax
+		lda accu + 1
 L1:
 		lsr	accu + 2
-		ror	accu + 1
+		ror
 		inx
 		bne	L1
 W2:
-		lda	accu + 1
 		sta	accu
 		lda	accu + 2
 		sta	accu + 1
 
 		rts
+W4:
+		lda accu + 1
+		bcs W2
 }
 
 __asm inp_conv_f32_u16
@@ -4387,7 +4476,7 @@ __asm inp_binop_mod_s32
 		bpl	L1
 		jsr	negaccu32
 		bit	tmp + 3
-		bpl	L2
+		bpl	L3
 		jsr	negtmp32
 L3:		jsr	divmod32
 		lda	tmp + 4
@@ -4398,9 +4487,9 @@ L3:		jsr	divmod32
 		sta	accu + 2
 		lda	tmp + 7
 		sta	accu + 3
-		rts
+		jmp	negaccu32
 L1:		bit	tmp + 3
-		bpl	L3
+		bpl	L2
 		jsr	negtmp32
 L2:		jsr	divmod32
 		lda	tmp + 4
@@ -4411,7 +4500,6 @@ L2:		jsr	divmod32
 		sta	accu + 2
 		lda	tmp + 7
 		sta	accu + 3
-		jsr	negaccu32
 }
 
 #pragma	bytecode(BC_BINOP_MOD_I32, inp_binop_mod_s32)

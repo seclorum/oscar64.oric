@@ -53,6 +53,12 @@ void vic_setmode(VicMode mode, const char * text, const char * font)
 	vic.memptr = (((unsigned)text >> 6) & 0xf0) | (((unsigned)font >> 10) & 0x0e);
 }
 
+bool vic_isBottom(void)
+{
+	return (vic.ctrl1 & VIC_CTRL1_RST8) != 0;
+}
+
+
 void vic_waitBottom(void)
 {
 	while (!(vic.ctrl1 & VIC_CTRL1_RST8))
@@ -112,6 +118,23 @@ void vic_waitBelow(int line)
 		while (vic.raster <= lower)
 			;
 	}
+}
+
+void vic_waitRange(char below, char above)
+{
+	while (vic.ctrl1 & VIC_CTRL1_RST8)
+		;
+
+	if (vic.raster >= above)
+	{
+		while (!(vic.ctrl1 & VIC_CTRL1_RST8))					
+			;
+		while (vic.ctrl1 & VIC_CTRL1_RST8)
+			;
+	}
+
+	while (vic.raster < below)
+		;
 }
 
 #pragma native(vic_waitLine)

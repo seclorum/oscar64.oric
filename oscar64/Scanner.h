@@ -49,6 +49,7 @@ enum Token
 	TK_EXTERN,
 	TK_INLINE,
 	TK_ASSUME,
+	TK_STATIC_ASSERT,
 
 	TK_ASM,
 	TK_INTERRUPT,
@@ -61,6 +62,8 @@ enum Token
 	TK_FORCEINLINE,
 	TK_STRIPED,
 	TK_DYNSTACK,
+	TK_PRESERVES,
+	TK_MEMMAP,
 
 	TK_NUMBER,
 	TK_CHARACTER,
@@ -193,6 +196,8 @@ public:
 
 	const Ident	*	mIdent;
 	const char	*	mString;
+	char		*	mBuffer;
+	int				mSize;
 	int				mNumArguments;
 	const Ident	*	mArguments[32];
 	MacroDict	*	mScope;
@@ -244,6 +249,7 @@ public:
 
 	void NextToken(void);
 	void UngetToken(Token token);
+	void UngetToken(Token token, const Ident * ident);
 
 	void BeginRecord(void);
 	TokenSequence* CompleteRecord(void);
@@ -312,6 +318,7 @@ protected:
 	int			mMacroExpansionDepth;
 
 	MacroDict* mDefines, * mDefineArguments, * mOnceDict;
+	Macro* mFileMacro, * mLineMacro;
 
 	Token		mUngetToken;
 

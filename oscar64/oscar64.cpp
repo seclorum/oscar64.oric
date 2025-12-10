@@ -7,9 +7,18 @@
 #ifdef __APPLE__
 #include <mach-o/dyld.h>
 #endif
+#ifdef __FreeBSD__
+  #include <sys/types.h>
+  #include <sys/sysctl.h>
+#endif
 #include "Compiler.h"
 #include "DiskImage.h"
 #include <time.h>
+
+#ifdef _WIN64
+#include <Dbghelp.h>
+#include <psapi.h>
+#endif
 
 #ifdef _WIN32
 bool GetProductAndVersion(char* strProductName, char* strProductVersion)
@@ -76,7 +85,7 @@ int main2(int argc, const char** argv)
 
 #else
 		strcpy(strProductName, "oscar64");
-		strcpy(strProductVersion, "1.31.258");
+		strcpy(strProductVersion, "1.32.266");
 
 #ifdef __APPLE__
 		uint32_t length = sizeof(basePath);
@@ -84,10 +93,18 @@ int main2(int argc, const char** argv)
 		_NSGetExecutablePath(basePath, &length);
 		length = strlen(basePath);
 #else
+#ifdef __FreeBSD__
+		size_t length = 200;
+		int oid[4] = {CTL_KERN, KERN_PROC, KERN_PROC_PATHNAME, -1};
+		if (sysctl((const int *)&oid[0], 4, basePath, &length, NULL, 0) < 0) {
+		  length = 0;
+		}
+#else
 		int length = readlink("/proc/self/exe", basePath, sizeof(basePath));
 
 		//		strcpy(basePath, argv[0]);
 		//		int length = strlen(basePath);
+#endif
 #endif
 #endif
 		while (length > 0 && basePath[length - 1] != '/' && basePath[length - 1] != '\\')
@@ -111,38 +128,12 @@ int main2(int argc, const char** argv)
 		GrowingArray<const char*>	dataFiles(nullptr);
 		GrowingArray<bool>			dataFileCompressed(false);
 
+		bool		emulate = false, profile = false, customCRT = false, asserts = false;
+		int			trace = 0;
+
 		compiler->mPreprocessor->AddPath(basePath);
 		strcpy_s(includePath, basePath);
-		{
-			FILE* crtFile;
-			char crtFileNamePath[FILENAME_MAX];
-			crtFileNamePath[FILENAME_MAX - 1] = '\0';
-			strcpy_s(crtFileNamePath, basePath);
-			strcat_s(crtFileNamePath, "include/crt.h");
-
-			if (!fopen_s(&crtFile, crtFileNamePath, "r"))
-				strcat_s(includePath, "include/");
-			else
-			{
-				strcpy_s(crtFileNamePath, basePath);
-				strcat_s(crtFileNamePath, "include/oscar64/crt.h");
-
-				if (!fopen_s(&crtFile, crtFileNamePath, "r"))
-					strcat_s(includePath, "include/oscar64/");
-				else
-				{
-					printf("Could not locate Oscar64 includes under %s\n", basePath);
-					return 20;
-				}
-			}
-			fclose(crtFile);
-		}
-		compiler->mPreprocessor->AddPath(includePath);
-		strcpy_s(crtPath, includePath);
-		strcat_s(crtPath, "crt.c");
-
-		bool		emulate = false, profile = false;
-		int			trace = 0;
+		strcat_s(includePath, "include");
 
 		targetPath[0] = 0;
 		diskPath[0] = 0;
@@ -185,6 +176,10 @@ int main2(int argc, const char** argv)
 				{
 					compiler->mPreprocessor->AddPath(arg + 3);
 				}
+				else if (arg[1] == 'i' && arg[2] == 'i' && arg[3] == '=')
+				{
+					strcpy_s(includePath, arg + 4);
+				}
 				else if (arg[1] == 'f' && arg[2] == '=')
 				{
 					dataFiles.Push(arg + 3);
@@ -206,6 +201,7 @@ int main2(int argc, const char** argv)
 				else if (arg[1] == 'r' && arg[2] == 't' && arg[3] == '=')
 				{
 					strcpy_s(crtPath, arg + 4);
+					customCRT = true;
 				}
 				else if (arg[1] == 'd' && arg[2] == '6' && arg[3] == '4' && arg[4] == '=')
 				{
@@ -225,6 +221,16 @@ int main2(int argc, const char** argv)
 					strcpy_s(cid, arg + 5);
 					compiler->mCartridgeID = atoi(cid);
 				}
+				else if (arg[1] == 'c' && arg[2] == 's' && arg[3] == 'u' && arg[4] == 'b' && arg[5] == '=')
+				{
+					char	cid[10];
+					strcpy_s(cid, arg + 6);
+					compiler->mCartridgeSubType = atoi(cid);
+				}
+				else if (arg[1] == 'c' && arg[2] == 'n' && arg[3] == 'a' && arg[4] == 'm' && arg[5] == 'e' && arg[6] == '=')
+				{
+					strcpy_s(compiler->mCartridgeName, arg + 7);
+				}
 				else if (arg[1] == 'n' && arg[2] == 0)
 				{
 					compiler->mCompilerOptions |= COPT_NATIVE;
@@ -236,6 +242,7 @@ int main2(int argc, const char** argv)
 				else if (arg[1] == 'p' && arg[2] == 's' && arg[3] == 'c' && arg[4] == 'i' && arg[5] == 0)
 				{
 					compiler->mCompilerOptions |= COPT_PETSCII;
+					compiler->AddDefine(Ident::Unique("__PETSCII__"), "1");
 				}
 				else if (arg[1] == 'O')
 				{
@@ -253,6 +260,8 @@ int main2(int argc, const char** argv)
 						compiler->mCompilerOptions |= COPT_OPTIMIZE_ASSEMBLER;
 					else if (arg[2] == 'i' && !arg[3])
 						compiler->mCompilerOptions |= COPT_OPTIMIZE_AUTO_INLINE;
+					else if (arg[2] == 'i' && arg[3] == 'i' && !arg[4])
+						compiler->mCompilerOptions |= COPT_OPTIMIZE_AUTO_INLINE | COPT_OPTIMIZE_AUTO_INLINE_ALL;
 					else if (arg[2] == 'z' && !arg[3])
 						compiler->mCompilerOptions |= COPT_OPTIMIZE_AUTO_ZEROPAGE;
 					else if (arg[2] == 'p' && !arg[3])
@@ -263,6 +272,8 @@ int main2(int argc, const char** argv)
 						compiler->mCompilerOptions |= COPT_OPTIMIZE_MERGE_CALLS;
 					else if (arg[2] == 'o' && !arg[3])
 						compiler->mCompilerOptions |= COPT_OPTIMIZE_OUTLINE;
+					else if (arg[2] == 'x' && !arg[3])
+						compiler->mCompilerOptions |= COPT_OPTIMIZE_PAGE_CROSSING;
 					else
 						compiler->mErrors->Error(loc, EERR_COMMAND_LINE, "Invalid command line argument", arg);
 				}
@@ -275,6 +286,8 @@ int main2(int argc, const char** argv)
 						trace = 2;
 					else if (arg[2] == 'b')
 						trace = 1;
+					else if (arg[2] == 'a')
+						asserts = true;
 				}
 				else if (arg[1] == 'D' && !arg[2])
 				{
@@ -371,78 +384,97 @@ int main2(int argc, const char** argv)
 		{
 			compiler->mTargetMachine = TMACH_C64;
 			compiler->AddDefine(Ident::Unique("__C64__"), "1");
+			compiler->AddDefine(Ident::Unique("__CBM__"), "1");
 		}
 		else if (!strcmp(targetMachine, "c128"))
 		{
 			strcpy_s(basicStart, "0x1c01");
 			compiler->mTargetMachine = TMACH_C128;
 			compiler->AddDefine(Ident::Unique("__C128__"), "1");
+			compiler->AddDefine(Ident::Unique("__CBM__"), "1");
 		}
 		else if (!strcmp(targetMachine, "c128b"))
 		{
 			strcpy_s(basicStart, "0x1c01");
 			compiler->mTargetMachine = TMACH_C128B;
 			compiler->AddDefine(Ident::Unique("__C128B__"), "1");
+			compiler->AddDefine(Ident::Unique("__CBM__"), "1");
 		}
 		else if (!strcmp(targetMachine, "c128e"))
 		{
 			strcpy_s(basicStart, "0x1c01");
 			compiler->mTargetMachine = TMACH_C128E;
 			compiler->AddDefine(Ident::Unique("__C128E__"), "1");
+			compiler->AddDefine(Ident::Unique("__CBM__"), "1");
 		}
 		else if (!strcmp(targetMachine, "vic20"))
 		{
 			strcpy_s(basicStart, "0x1001");
 			compiler->mTargetMachine = TMACH_VIC20;
 			compiler->AddDefine(Ident::Unique("__VIC20__"), "1");
+			compiler->AddDefine(Ident::Unique("__CBM__"), "1");
 		}
 		else if (!strcmp(targetMachine, "vic20+3"))
 		{
 			strcpy_s(basicStart, "0x0401");
 			compiler->mTargetMachine = TMACH_VIC20_3K;
 			compiler->AddDefine(Ident::Unique("__VIC20__"), "1");
+			compiler->AddDefine(Ident::Unique("__CBM__"), "1");
 		}
 		else if (!strcmp(targetMachine, "vic20+8"))
 		{
 			strcpy_s(basicStart, "0x1201");
 			compiler->mTargetMachine = TMACH_VIC20_8K;
 			compiler->AddDefine(Ident::Unique("__VIC20__"), "1");
+			compiler->AddDefine(Ident::Unique("__CBM__"), "1");
 		}
 		else if (!strcmp(targetMachine, "vic20+16"))
 		{
 			strcpy_s(basicStart, "0x1201");
 			compiler->mTargetMachine = TMACH_VIC20_16K;
 			compiler->AddDefine(Ident::Unique("__VIC20__"), "1");
+			compiler->AddDefine(Ident::Unique("__CBM__"), "1");
 		}
 		else if (!strcmp(targetMachine, "vic20+24"))
 		{
 			strcpy_s(basicStart, "0x1201");
 			compiler->mTargetMachine = TMACH_VIC20_24K;
 			compiler->AddDefine(Ident::Unique("__VIC20__"), "1");
+			compiler->AddDefine(Ident::Unique("__CBM__"), "1");
 		}
 		else if (!strcmp(targetMachine, "pet"))
 		{
 			strcpy_s(basicStart, "0x0401");
 			compiler->mTargetMachine = TMACH_PET_8K;
 			compiler->AddDefine(Ident::Unique("__CBMPET__"), "1");
+			compiler->AddDefine(Ident::Unique("__CBM__"), "1");
 		}
 		else if (!strcmp(targetMachine, "pet16"))
 		{
 			strcpy_s(basicStart, "0x0401");
 			compiler->mTargetMachine = TMACH_PET_16K;
 			compiler->AddDefine(Ident::Unique("__CBMPET__"), "1");
+			compiler->AddDefine(Ident::Unique("__CBM__"), "1");
 		}
 		else if (!strcmp(targetMachine, "pet32"))
 		{
 			strcpy_s(basicStart, "0x0401");
 			compiler->mTargetMachine = TMACH_PET_32K;
 			compiler->AddDefine(Ident::Unique("__CBMPET__"), "1");
+			compiler->AddDefine(Ident::Unique("__CBM__"), "1");
 		}
 		else if (!strcmp(targetMachine, "plus4"))
 		{
 			strcpy_s(basicStart, "0x1001");
 			compiler->mTargetMachine = TMACH_PLUS4;
 			compiler->AddDefine(Ident::Unique("__PLUS4__"), "1");
+			compiler->AddDefine(Ident::Unique("__CBM__"), "1");
+		}
+		else if (!strcmp(targetMachine, "mega65"))
+		{
+			strcpy_s(basicStart, "0x2001");		
+			compiler->mTargetMachine = TMACH_MEGA65;
+			compiler->AddDefine(Ident::Unique("__MEGA65__"), "1");
 		}
 		else if (!strcmp(targetMachine, "x16"))
 		{
@@ -570,7 +602,43 @@ int main2(int argc, const char** argv)
 				compiler->AddDefine(Ident::Unique("__TIME__"), _strdup(tstring));
 			}
 
+			if (compiler->mCompilerOptions & COPT_OPTIMIZE_CODE_SIZE)
+				compiler->AddDefine(Ident::Unique("OSCAR_OPTIMIZE_SIZE"), "1");
+
+
 			// Add runtime module
+
+			compiler->mPreprocessor->AddPath(includePath);
+
+			if (!customCRT)
+			{
+				FILE* crtFile;
+				char crtFileNamePath[FILENAME_MAX];
+				crtFileNamePath[FILENAME_MAX - 1] = '\0';
+				strcpy_s(crtFileNamePath, includePath);
+				strcat_s(crtFileNamePath, "/crt.h");
+
+				if (fopen_s(&crtFile, crtFileNamePath, "r"))
+				{
+					strcpy_s(crtFileNamePath, basePath);
+					strcat_s(crtFileNamePath, "include/oscar64/crt.h");
+
+					if (!fopen_s(&crtFile, crtFileNamePath, "r")) {
+						strcpy_s(includePath, basePath);
+						strcat_s(includePath, "include/oscar64/");
+						compiler->mPreprocessor->AddPath(includePath);
+					}
+					else
+					{
+						printf("Could not locate Oscar64 includes under %s\n", basePath);
+						return 20;
+					}
+				}
+				fclose(crtFile);
+
+				strcpy_s(crtPath, includePath);
+				strcat_s(crtPath, "/crt.c");
+			}
 
 			if (crtPath[0])
 				compiler->mCompilationUnits->AddUnit(loc, crtPath, nullptr);
@@ -606,7 +674,7 @@ int main2(int argc, const char** argv)
 				}
 
 				if (emulate)
-					compiler->ExecuteCode(profile, trace);
+					compiler->ExecuteCode(profile, trace, asserts);
 			}
 			else if (compiler->mCompilerOptions & COPT_ERROR_FILES)
 			{
@@ -632,8 +700,183 @@ int main2(int argc, const char** argv)
 #ifndef _DEBUG
 int seh_filter(unsigned int code, struct _EXCEPTION_POINTERS* info)
 {
+
 #ifdef _WIN64
-	printf("oscar64 crashed. %08x %08llx", info->ExceptionRecord->ExceptionCode, (uint64)(info->ExceptionRecord->ExceptionAddress));
+
+#pragma warning( push )
+#pragma warning( disable : 4996)
+
+	char buff[256];
+	switch (info->ExceptionRecord->ExceptionCode)
+	{
+	case EXCEPTION_ACCESS_VIOLATION:
+		sprintf(buff, "Addressing Error[Permissions do not allow this access]");
+		break;
+
+	case EXCEPTION_ARRAY_BOUNDS_EXCEEDED:
+		sprintf(buff, "Addressing Error[Array Bounds Exceeded]");
+		break;
+
+	case EXCEPTION_BREAKPOINT:
+		sprintf(buff, "Breakpoint Instruction Encountered");
+		break;
+
+	case EXCEPTION_DATATYPE_MISALIGNMENT:
+		sprintf(buff, "Addressing Error[Data Access Misaligned]");
+		break;
+
+	case EXCEPTION_FLT_DENORMAL_OPERAND:
+		sprintf(buff, "Arithmetic Exception[Float Denormal Operand]");
+		break;
+
+	case EXCEPTION_FLT_DIVIDE_BY_ZERO:
+		sprintf(buff, "Arithmetic Exception[Float Divide-by-zero]");
+		break;
+
+	case EXCEPTION_FLT_INEXACT_RESULT:
+		sprintf(buff, "Arithmetic Exception[Float Inexact Result]");
+		break;
+
+	case EXCEPTION_FLT_INVALID_OPERATION:
+		sprintf(buff, "Arithmetic Exception[Float Invalid Operation]");
+		break;
+
+	case EXCEPTION_FLT_OVERFLOW:
+		sprintf(buff, "Arithmetic Exception[Float Overflow]");
+		break;
+
+	case EXCEPTION_FLT_STACK_CHECK:
+		sprintf(buff, "Arithmetic Exception[Float Stack Check]");
+		break;
+
+	case EXCEPTION_FLT_UNDERFLOW:
+		sprintf(buff, "Arithmetic Exception[Float Underflow]");
+		break;
+
+	case EXCEPTION_ILLEGAL_INSTRUCTION:
+		sprintf(buff, "Illegal Instruction");
+		break;
+
+	case EXCEPTION_IN_PAGE_ERROR:
+		sprintf(buff, "Memory Paging Error");
+		break;
+
+	case EXCEPTION_INT_DIVIDE_BY_ZERO:
+		sprintf(buff, "Arithmetic Exception[Integer Divide-by-zero]");
+		break;
+
+	case EXCEPTION_INT_OVERFLOW:
+		sprintf(buff, "Arithmetic Exception[Integer Overflow]");
+		break;
+
+	case EXCEPTION_INVALID_DISPOSITION:
+		sprintf(buff, "Exception Handler Invalid Disposition");
+		break;
+
+	case EXCEPTION_NONCONTINUABLE_EXCEPTION:
+		sprintf(buff, "Thread Attempted To Continue When Not Allowed");
+		break;
+
+	case EXCEPTION_PRIV_INSTRUCTION:
+		sprintf(buff, "Illegal Instruction[Privileged Op code]");
+		break;
+
+	case EXCEPTION_SINGLE_STEP:
+		sprintf(buff, "Single Step Executed");
+		break;
+
+	case EXCEPTION_STACK_OVERFLOW:
+		sprintf(buff, "Stack Fault[overfolow]");
+		break;
+
+	default:
+		sprintf(buff, "Unknown code 0x%-8.8lx", info->ExceptionRecord->ExceptionCode);
+		break;
+	}
+
+	printf("%s at location 0x%016llx\n", buff, info->ContextRecord->Rip);
+
+	DWORD  err;
+	HANDLE hProcess;
+	ULONG64	buffer[(sizeof(SYMBOL_INFO) + MAX_SYM_NAME * sizeof(TCHAR) + sizeof(ULONG64) - 1) / sizeof(ULONG64) + 20];
+	PSYMBOL_INFO		pSymbol = (PSYMBOL_INFO)buffer;
+	IMAGEHLP_LINE64		line = { sizeof(IMAGEHLP_LINE64) };
+	DWORD64 displacement;
+	DWORD	loffset;
+
+	SymSetOptions(SYMOPT_UNDNAME | SYMOPT_DEFERRED_LOADS);
+	hProcess = GetCurrentProcess();
+
+	BOOL printSymbols = SymInitialize(hProcess, NULL, TRUE);
+	if (!printSymbols)
+	{
+		// SymInitialize failed
+		err = GetLastError();
+		printf("SymInitialize returned error : %d\n", err);
+		return EXCEPTION_EXECUTE_HANDLER;
+	}
+
+	STACKFRAME64 stackFrame = { 0 };
+	CONTEXT context = *info->ContextRecord;
+	stackFrame.AddrPC.Offset = info->ContextRecord->Rip;
+	stackFrame.AddrPC.Segment = 0;
+	stackFrame.AddrPC.Mode = AddrModeFlat;
+	stackFrame.AddrFrame.Offset = info->ContextRecord->Rbp;
+	stackFrame.AddrFrame.Segment = 0;
+	stackFrame.AddrFrame.Mode = AddrModeFlat;
+	stackFrame.AddrFrame.Offset = info->ContextRecord->Rsp;
+	stackFrame.AddrStack.Mode = AddrModeFlat;
+	stackFrame.AddrStack.Segment = 0;
+
+	while (StackWalk64(IMAGE_FILE_MACHINE_AMD64,
+		GetCurrentProcess(),
+		GetCurrentThread(),
+		&stackFrame,
+		&context,
+		NULL, /* PREAD_PROCESS_MEMORY_ROUTINE64 ReadMemoryRoutine */
+		SymFunctionTableAccess64,
+		SymGetModuleBase64,
+		NULL /* PTRANSLATE_ADDRESS_ROUTINE64 TranslateAddress */
+	))
+	{
+		if (true)
+		{
+			printf("...StackFrame\n");
+			printf("......PC address 0x%016llx\n", stackFrame.AddrPC.Offset);
+			printf("......Module address 0x%016llx\n", SymGetModuleBase64(GetCurrentProcess(), stackFrame.AddrPC.Offset));
+			printf("......Return address 0x%016llx\n", stackFrame.AddrReturn.Offset);
+			printf("......Frame address 0x%016llx\n", stackFrame.AddrFrame.Offset);
+			printf("......Stack address 0x%016llx\n", stackFrame.AddrStack.Offset);
+			printf("......Param[0] 0x%016llx\n", stackFrame.Params[0]);
+			printf("......Param[1] 0x%016llx\n", stackFrame.Params[1]);
+			printf("......Param[2] 0x%016llx\n", stackFrame.Params[2]);
+			printf("......Param[3] 0x%016llx\n", stackFrame.Params[3]);
+		}
+		pSymbol->MaxNameLen = MAX_SYM_NAME;
+		pSymbol->SizeOfStruct = sizeof(SYMBOL_INFO);;
+
+		if (SymFromAddr(hProcess, stackFrame.AddrPC.Offset, &displacement, pSymbol))
+		{
+			if (SymGetLineFromAddr64(hProcess, stackFrame.AddrPC.Offset, &loffset, &line))
+			{
+				printf("...Procedure %s:0x%-8.8lx LINE %s.%d\n", pSymbol->Name, (DWORD)displacement, line.FileName, line.LineNumber);
+			}
+			else
+			{
+				printf("...Procedure %s:0x%-8.8lx\n", pSymbol->Name, (DWORD)displacement);
+			}
+		}
+		else
+		{
+			err = GetLastError();
+			printf("Call to SymEnumSymbolsForAddr failed, error = %d (0x%-8.8x)\n", err, err);
+		}
+	}
+	printf("...Returning EXCEPTION_EXECUTE_HANDLER\n");
+
+#pragma warning( pop )
+
+//	printf("oscar64 crashed. %08x %08llx", info->ExceptionRecord->ExceptionCode, (uint64)(info->ExceptionRecord->ExceptionAddress));
 #else
 	printf("oscar64 crashed. %08x %08x", info->ExceptionRecord->ExceptionCode, (uint32)(info->ExceptionRecord->ExceptionAddress));
 #endif

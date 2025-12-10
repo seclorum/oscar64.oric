@@ -11,6 +11,7 @@ public:
 	~Parser(void);
 
 	Parser* Clone(void);
+	Parser				*	mParent;
 
 	DeclarationScope	*	mGlobals, * mScope, * mTemplateScope, * mCaptureScope;
 	int						mLocalIndex;
@@ -23,6 +24,8 @@ public:
 	uint64			mCompilerOptions;
 	uint64			mCompilerOptionStack[32];
 	int				mCompilerOptionSP;
+
+	Location FullLocation(const Location& loc);
 
 	void Parse(void);
 protected:
@@ -66,6 +69,8 @@ protected:
 	Expression * AddFunctionCallRefReturned(Expression * exp);
 	Expression* CleanupExpression(Expression* exp);
 
+	void ExpandStructuredBinding(Declaration* dec);
+
 	Declaration* ParseBaseTypeQualify(bool qualified, Declaration* dec, const Ident *& pident);
 	Declaration* ParseBaseTypeDeclaration(uint64 flags, bool qualified, Declaration* ptempl = nullptr);
 	Declaration* ParseDeclaration(Declaration* pdec, bool variable, bool expression, bool member, Declaration * pthis = nullptr, Declaration * ptempl = nullptr);
@@ -77,12 +82,15 @@ protected:
 	Expression* DefaultInitExpression(Expression* vexp);
 	Expression* ParseVarInitExpression(Expression* lexp, bool inner = false);
 	Expression* CloneVarInitExpression(Expression* vexp, Expression* iexp, Expression * qexp);
+	Expression* CopyElision(Expression* vexp, Expression* rexp);
 
-	Declaration* ParsePostfixDeclaration(void);
+	Declaration* ParsePostfixDeclaration(bool autoBase);
 	Declaration* ReverseDeclaration(Declaration* odec, Declaration* bdec);
 
 	Expression* ParseFunction(Declaration* dec);
 	Expression* ParseAssembler(Declaration * vdassm = nullptr);
+
+	uint64 ParseAssemblerFlags(void);
 
 	Expression* ParseAssemblerBaseOperand(Declaration* pcasm, int pcoffset);
 	Expression* ParseAssemblerMulOperand(Declaration* pcasm, int pcoffset);
@@ -133,7 +141,10 @@ protected:
 
 	Declaration* ParseTypeID(bool tid, Declaration * bdec = nullptr);
 
+	Expression* ParseConstruction(Declaration* type);
+
 	Expression* ParseCastExpression(Expression* exp);
+	Expression* ParseIdentExpression(const Location & eloc, Declaration* dec, bool lhs, bool tid = false);
 	Expression* ParseSimpleExpression(bool lhs, bool tid = false);
 	Expression* ParsePrefixExpression(bool lhs);
 	Expression* ParsePostfixExpression(bool lhs);
@@ -155,6 +166,7 @@ protected:
 	Expression* ParseListExpression(bool lhs, Declaration * params = nullptr);
 
 	Expression* ParseParenthesisExpression(void);
+	void ParseStaticAssert(void);
 
 	Errors* mErrors;
 	Scanner* mScanner;

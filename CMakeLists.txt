@@ -26,6 +26,14 @@ set_target_properties(oscar64 PROPERTIES
     CXX_EXTENSIONS NO
 )
 
+# Set debug and release configurations
+target_compile_definitions(oscar64 PRIVATE $<$<CONFIG:Debug>:_DEBUG;_CONSOLE> $<$<CONFIG:Release>:NDEBUG;_CONSOLE>)
+
+if (WIN32)
+    target_compile_options(oscar64 PRIVATE $<$<CONFIG:Debug>:/W3 /WX> $<$<CONFIG:Release>:/O2 /W3>)
+else ()
+    target_compile_options(oscar64 PRIVATE -Wall)
+endif ()
 
 # Post-build steps (only for Release builds)
 if(CMAKE_BUILD_TYPE STREQUAL "Release")
@@ -74,3 +82,4 @@ set_target_properties(oscar64 PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY_RELEASE ${CMAKE_BINARY_DIR}/Release
 )
 
+install(TARGETS oscar64 RUNTIME DESTINATION bin)

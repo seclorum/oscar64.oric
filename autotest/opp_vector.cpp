@@ -64,5 +64,15 @@ int main(void)
 		opp::cout << i << ", ";
 	opp::cout << "\n";
 
+	assert(v.size() == 36);
+	assert(v[18] == 60);
+
+	v.assign(42, 11);
+
+	assert(v.size() == 42);
+	assert(v[0] == 11);
+	assert(v[15] == 11);
+	assert(v[41] == 11);
+
 	return 0;
 }

@@ -2,6 +2,7 @@
 #include "conio.h"
 #include "stdlib.h"
 
+
 void putchar(char c)
 {
 	putpch(c);
@@ -70,14 +71,15 @@ void * putstrstr(void * handle, const char * str)
 struct sinfo
 {
 	char		fill;
-	char		width, precision;
-	unsigned	base;
+	char		width, precision, cha;
+	char		base;
 	bool		sign, left, prefix;
 };
 
-int nformi(const sinfo * si, char * str, int v, bool s)
+char nformi(const sinfo * si, char * str, int v, bool s)
 {
 	char	buffer[16];
+	char	base = si->base;
 
 	unsigned int u = v;
 	bool	neg = false;
@@ -91,10 +93,10 @@ int nformi(const sinfo * si, char * str, int v, bool s)
 	char	i = 16;
 	while (u > 0)
 	{
-		int	c = u % si->base;
-		c += c >= 10 ? 'A' - 10 : '0';
+		char	c = u % base;
+		c += c >= 10 ? si->cha - 10 : '0';
 		buffer[--i] = c;
-		u /= si->base;
+		u /= base;
 	}
 
 	char	digits = si->precision != 255 ? 16 - si->precision : 15;
@@ -102,9 +104,9 @@ int nformi(const sinfo * si, char * str, int v, bool s)
 	while (i > digits)
 		buffer[--i] = '0';
 
-	if (si->prefix && si->base == 16)
+	if (si->prefix && base == 16)
 	{
-		buffer[--i] = 'X';
+		buffer[--i] = si->cha + ('x' - 'a');
 		buffer[--i] = '0';
 	}
 
@@ -132,7 +134,7 @@ int nformi(const sinfo * si, char * str, int v, bool s)
 	return j;
 }
 
-int nforml(const sinfo * si, char * str, long v, bool s)
+char nforml(const sinfo * si, char * str, long v, bool s)
 {
 	char	buffer[16];
 
@@ -150,7 +152,7 @@ int nforml(const sinfo * si, char * str, long v, bool s)
 	while (u > 0)
 	{
 		int	c = u % si->base;
-		c += c >= 10 ? 'A' - 10 : '0';
+		c += c >= 10 ? si->cha - 10 : '0';
 		buffer[--i] = c;
 		u /= si->base;
 	}
@@ -162,7 +164,7 @@ int nforml(const sinfo * si, char * str, long v, bool s)
 
 	if (si->prefix && si->base == 16)
 	{
-		buffer[--i] = 'X';
+		buffer[--i] = si->cha + ('x' - 'a');
 		buffer[--i] = '0';
 	}
 
@@ -194,7 +196,7 @@ static float fround5[] = {
 	0.5e-0, 0.5e-1, 0.5e-2, 0.5e-3, 0.5e-4, 0.5e-5, 0.5e-6
 };
 
-int nformf(const sinfo * si, char * str, float f, char type)
+char nformf(const sinfo * si, char * str, float f, char type)
 {
 	char 	* 	sp = str;
 
@@ -210,9 +212,9 @@ int nformf(const sinfo * si, char * str, float f, char type)
 		
 	if (isinf(f))
 	{
-		sp[d++] = 'I';
-		sp[d++] = 'N';
-		sp[d++] = 'F';
+		sp[d++] = si->cha + ('i' - 'a');
+		sp[d++] = si->cha + ('n' - 'a');
+		sp[d++] = si->cha + ('f' - 'a');
 	}
 	else
 	{
@@ -312,7 +314,7 @@ int nformf(const sinfo * si, char * str, float f, char type)
 
 		if (fexp)
 		{
-			sp[d++] = 'E';
+			sp[d++] = si->cha + ('e' - 'a');
 			if (exp < 0)
 			{
 				sp[d++] = '-';
@@ -425,8 +427,9 @@ char * sformat(char * buff, const char * fmt, int * fps, bool print)
 			{
 				bi = nformi(&si, bp, *fps++, false);
 			}
-			else if (c == 'x' || c == p'x')
+			else if (c == 'x' || c == p'x' || c == 'X')
 			{
+				si.cha = (c & 0xe0) | 1;
 				si.base = 16;
 				bi = nformi(&si, bp, *fps++, false);
 			}
@@ -438,7 +441,7 @@ char * sformat(char * buff, const char * fmt, int * fps, bool print)
 				fps ++;
 
 				c = *p++;
-				if (c == 'd' || c == p'd')
+				if (c == 'd' || c == p'd' || c == 'i' || c == p'i')
 				{
 					bi = nforml(&si, bp, l, true);
 				}
@@ -446,17 +449,22 @@ char * sformat(char * buff, const char * fmt, int * fps, bool print)
 				{
 					bi = nforml(&si, bp, l, false);
 				}
-				else if (c == 'x' || c == p'x')
+				else if (c == 'x' || c == p'x' || c == 'X')
 				{
+					si.cha = (c & 0xe0) | 1;
 					si.base = 16;
 					bi = nforml(&si, bp, l, false);
 				}
 			}
 #endif
 #ifndef NOFLOAT
-			else if (c == 'f' || c == 'g' || c == 'e' || c == p'f' || c == p'g' || c == p'e')
+			else if (
+				c == 'f' || c == 'g' || c == 'e' || 
+				c == p'f' || c == p'g' || c == p'e' ||
+				c == 'F' || c == 'G' || c == 'E')
 			{
-				bi = nformf(&si, bp, *(float *)fps, c);
+				si.cha = (c & 0xe0) | 1;
+				bi = nformf(&si, bp, *(float *)fps, c - si.cha + 'a');
 				fps ++;
 				fps ++;
 			}
@@ -556,6 +564,17 @@ int sprintf(char * str, const char * fmt, ...)
 	return d - str;
 }
 
+void vprintf(const char * fmt, va_list vlist)
+{
+	char	buff[50];
+	sformat(buff, fmt, (int *)vlist, true);
+}
+
+int vsprintf(char * str, const char * fmt, va_list vlist)
+{
+	char * d = sformat(str, fmt, (int *)vlist, false);
+	return d - str;
+}
 
 static inline bool isspace(char c)
 {
@@ -677,6 +696,9 @@ int fpscanf(const char * fmt, int (* ffunc)(void * p), void * fparam, void ** pa
 				
 				switch (fc)
 				{
+#ifndef __PETSCII__
+					case p'n':
+#endif
 					case 'n':
 						*(unsigned *)*params = nch;
 						params++;					
@@ -684,15 +706,23 @@ int fpscanf(const char * fmt, int (* ffunc)(void * p), void * fparam, void ** pa
 						break;
 
 					case 'x':
+#ifndef __PETSCII__
 					case p'x':
+#else
+					case 'X':
+#endif
 						base = 16;
 					case 'u':
+#ifndef __PETSCII__
 					case p'u':
+#endif
 						issigned = false;
 					case 'i':
 					case 'd':
+#ifndef __PETSCII__
 					case p'i':
 					case p'd':
+#endif
 					{
 						bool	sign = false;
 						if (cs == '-')
@@ -773,9 +803,15 @@ int fpscanf(const char * fmt, int (* ffunc)(void * p), void * fparam, void ** pa
 					case 'f':
 					case 'e':
 					case 'g':
+#ifndef __PETSCII__
 					case p'f':
 					case p'e':
 					case p'g':
+#else
+					case 'F':
+					case 'E':
+					case 'G':
+#endif
 					{
 						bool	sign = false;
 						if (cs == '-')
@@ -882,7 +918,9 @@ int fpscanf(const char * fmt, int (* ffunc)(void * p), void * fparam, void ** pa
 					} break;
 #endif
 					case 's':
+#ifndef __PETSCII__
 					case p's':
+#endif
 					{
 						char	*	pch = (char *)*params;
 						while (width > 0 && cs > 0 && !isspace(cs))
@@ -925,17 +963,26 @@ int fpscanf(const char * fmt, int (* ffunc)(void * p), void * fparam, void ** pa
 					}	break;
 
 					case 'c':
+#ifndef __PETSCII__
 					case p'c':
+#endif
 					{
 						char	*	pch = (char *)*params;
+						if (width == 0x7fff)
+							width = 1;
+						while (width > 0 && cs > 0)
+						{
+							if (!ignore)
+								*pch++ = cs;
+							cs = ffunc(fparam);
+							nch++;
+							width--;
+						}
 						if (!ignore)
 						{
-							*pch = cs;
 							params++;					
 							nv++;
 						}
-						cs = ffunc(fparam);
-						nch++;
 					} break;
 				}
 				
@@ -982,5 +1029,185 @@ int scanf(const char * fmt, ...)
 	return fpscanf(fmt, scanf_func, nullptr, (void **)((&fmt) + 1));
 }
 
+#if defined(__CBM__)
+#include <c64/kernalio.h>
 
+
+#define FNUM_BASE	2
+
+struct FILE
+{
+	signed char	fnum;
+};
+
+FILE	files[FOPEN_MAX];
+FILE 	stdio_file = {-1};
+
+FILE * stdin = &stdio_file;
+FILE * stdout = &stdio_file;
+
+FILE * fopen(const char * fname, const char * mode)
+{
+	char i = 0;
+	while (i < FOPEN_MAX && files[i].fnum)
+		i++;
+
+	if (i < FOPEN_MAX)
+	{
+		char cbmname[32];
+		char j = 0, rj = 0;
+		char pdrive = 0, pdevice = 8, t = 0;
+
+		while (fname[j] >= '0' && fname[j] <= '9')
+			t = t * 10 + (fname[j++] - '0');
+		if (fname[j] == ':')
+		{
+			j++;
+			pdrive = t;
+
+			rj = j;
+			t = 0;
+			while (fname[j] >= '0' && fname[j] <= '9')
+				t = t * 10 + (fname[j++] - '0');
+			if (fname[j] == ':')
+			{
+				j++;
+				pdevice = pdrive;
+				pdrive = t;
+			}
+			else
+				j = rj;
+		}
+		else
+			j = rj;
+
+		char k = 1, s = 1;
+		if (pdrive >= 10)
+		{
+			cbmname[k++] = pdrive / 10 + '0';
+			pdrive %= 10;
+		}
+		cbmname[k++] = pdrive + '0';
+		cbmname[k++] = ':';
+		while (fname[j])
+			cbmname[k++] = fname[j++];
+		cbmname[k++] = ',';
+		cbmname[k++] = p's';
+		cbmname[k++] = ',';
+		if (mode[0] == 'w' || mode[0] == 'W')
+		{
+			cbmname[k++] = p'w';
+			cbmname[--s] = p'@';
+		}
+		else if (mode[0] == 'r' || mode[0] == 'R')
+			cbmname[k++] = p'r';
+		else if (mode[0] == 'a' || mode[0] == 'A')
+			cbmname[k++] = p'a';
+		cbmname[k++] = 0;
+
+		krnio_setnam(cbmname + s);
+		if (krnio_open(i + FNUM_BASE, pdevice, i + FNUM_BASE))
+		{
+			files[i].fnum = i + FNUM_BASE;
+			return files + i;
+		}
+	}
+
+	return nullptr;
+}
+
+int fclose(FILE * fp)
+{
+	krnio_close(fp->fnum);
+	fp->fnum = 0;
+	return 0;
+}
+
+int fgetc(FILE* stream)
+{
+	if (stream->fnum >= 0)
+		return krnio_getch(stream->fnum);
+	else
+		return getpch();
+}
+
+char* fgets(char* s, int n, FILE* stream)
+{
+	if (krnio_gets(stream->fnum, s, n) > 0)
+		return s;
+	return nullptr;
+}
+
+int fputc(int c, FILE* stream)
+{
+	if (stream->fnum >= 0)
+		return krnio_putch(stream->fnum, c);
+	else
+	{
+		putpch(c);
+		return 0;
+	}
+
+}
+
+int fputs(const char* s, FILE* stream)
+{
+	if (stream->fnum >= 0)
+		return krnio_puts(stream->fnum, s);	
+	else
+	{
+		puts(s);
+		return 0;
+	}
+}
+
+int feof(FILE * stream)
+{
+	return stream->fnum >= 0 && krnio_pstatus[stream->fnum] == KRNIO_EOF;
+}
+
+size_t fread( void * buffer, size_t size, size_t count, FILE * stream )
+{
+	return krnio_read(stream->fnum, (char *)buffer, size * count) / size;
+}
+
+size_t fwrite( const void* buffer, size_t size, size_t count, FILE* stream )
+{
+	return krnio_write(stream->fnum, (const char *)buffer, size * count) / size;	
+}
+
+int fprintf( FILE * stream, const char* format, ... )
+{
+	char	buff[50];
+	if (stream->fnum < 0 || krnio_chkout(stream->fnum))
+	{
+		sformat(buff, format, (int *)&format + 1, true);
+		krnio_clrchn();
+		return 0;
+	}
+	else
+		return -1;
+}
+
+int fscanf_func(void * fparam)
+{
+	char ch = krnio_chrin();
+	return ch;
+}
+
+int fscanf( FILE *stream, const char *format, ... )
+{
+	if (stream->fnum < 0 || krnio_chkin	(stream->fnum))
+	{
+		int res = fpscanf(format, fscanf_func, nullptr, (void **)((&format) + 1));
+		krnioerr err = krnio_status();
+		krnio_pstatus[stream->fnum] = err;
+		krnio_clrchn();
+		return res;
+	}
+	else
+		return -1;
+}
+
+#endif
 

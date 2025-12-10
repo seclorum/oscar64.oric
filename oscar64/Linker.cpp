@@ -45,13 +45,30 @@ bool LinkerReference::operator!=(const LinkerReference& ref)
 }
 
 LinkerObject::LinkerObject(void)
-	: mReferences(nullptr), mNumTemporaries(0), mSize(0), mAlignment(1), mStackSection(nullptr), mIdent(nullptr), mFullIdent(nullptr), mStartUsed(0x10000), mEndUsed(0x00000), mMemory(nullptr)
-	, mPrefix(nullptr), mSuffix(nullptr), mProc(nullptr), mNativeProc(nullptr)
+	: mReferences(nullptr), mNumTemporaries(0), mSize(0), mStripe(0), mAlignment(1), mStackSection(nullptr), mIdent(nullptr), mFullIdent(nullptr), mStartUsed(0x10000), mEndUsed(0x00000), mMemory(nullptr)
+	, mPrefix(nullptr), mSuffix(nullptr), mProc(nullptr), mNativeProc(nullptr), mOwnerProc(nullptr)
 {}
 
 LinkerObject::~LinkerObject(void)
 {
 
+}
+
+LinkerObject* LinkerObject::CloneAssembler(Linker* linker) const
+{
+	LinkerObject* lo = linker->AddObject(mLocation, mIdent, mSection, mType, mAlignment);
+	lo->AddData(mData, mSize);
+	lo->mFlags = mFlags;
+
+	for (int i = 0; i < mReferences.Size(); i++)
+	{
+		LinkerReference		ref = *(mReferences[i]);
+		if (ref.mObject == this) ref.mObject = lo;
+		if (ref.mRefObject == this) ref.mRefObject = lo;
+		lo->AddReference(ref);
+	}
+
+	return lo;
 }
 
 void LinkerObject::AddReference(const LinkerReference& ref)
@@ -106,6 +123,12 @@ void LinkerObject::AddLocations(const ExpandingArray<CodeLocation>& locations)
 {
 	for (int i = 0; i < locations.Size(); i++)
 		mCodeLocations.Push(locations[i]);
+}
+
+void LinkerObject::AddOrigins(const ExpandingArray<CodeLocation>& locations)
+{
+	for (int i = 0; i < locations.Size(); i++)
+		mCodeOrigins.Push(locations[i]);
 }
 
 
@@ -243,8 +266,21 @@ bool Linker::IsSectionPlaced(LinkerSection* section)
 	return false;
 }
 
-LinkerObject* Linker::FindObjectByAddr(int addr)
+LinkerObject* Linker::FindObjectByAddr(int addr, InterCodeProcedure* proc)
 {
+	if (proc)
+	{
+		for (int i = 0; i < mObjects.Size(); i++)
+		{
+			LinkerObject* lobj = mObjects[i];
+			if (lobj->mFlags & LOBJF_PLACED)
+			{
+				if (addr >= lobj->mAddress && addr < lobj->mAddress + lobj->mSize && lobj->mOwnerProc == proc)
+					return lobj;
+			}
+		}
+	}
+
 	for (int i = 0; i < mObjects.Size(); i++)
 	{
 		LinkerObject* lobj = mObjects[i];
@@ -258,8 +294,39 @@ LinkerObject* Linker::FindObjectByAddr(int addr)
 	return nullptr;
 }
 
-LinkerObject* Linker::FindObjectByAddr(int bank, int addr)
+LinkerObject* Linker::FindObjectByName(const char* name)
 {
+	for (int i = 0; i < mObjects.Size(); i++)
+	{
+		LinkerObject* lobj = mObjects[i];
+		if (lobj->mFlags & LOBJF_PLACED)
+		{
+			if (lobj->mIdent && !strcmp(lobj->mIdent->mString, name))
+				return lobj;
+		}
+	}
+
+	return nullptr;
+}
+
+LinkerObject* Linker::FindObjectByAddr(int bank, int addr, InterCodeProcedure* proc)
+{
+	if (proc)
+	{
+		for (int i = 0; i < mObjects.Size(); i++)
+		{
+			LinkerObject* lobj = mObjects[i];
+			if (lobj->mFlags & LOBJF_PLACED)
+			{
+				if (lobj->mRegion && ((1ULL << bank) & lobj->mRegion->mCartridgeBanks))
+				{
+					if (addr >= lobj->mAddress && addr < lobj->mAddress + lobj->mSize && proc == lobj->mOwnerProc)
+						return lobj;
+				}
+			}
+		}
+	}
+
 	for (int i = 0; i < mObjects.Size(); i++)
 	{
 		LinkerObject* lobj = mObjects[i];
@@ -273,7 +340,7 @@ LinkerObject* Linker::FindObjectByAddr(int bank, int addr)
 		}
 	}
 
-	return FindObjectByAddr(addr);
+	return FindObjectByAddr(addr, proc);
 }
 
 LinkerObject* Linker::FindSame(LinkerObject* obj)
@@ -633,7 +700,7 @@ bool LinkerRegion::Allocate(Linker * linker, LinkerObject* lobj, bool merge, boo
 		int start = (mFreeChunks[i].mStart + lobj->mAlignment - 1) & ~(lobj->mAlignment - 1);
 		int end = start + lobj->mSize;
 
-		if (!(linker->mCompilerOptions & COPT_OPTIMIZE_CODE_SIZE) && (lobj->mFlags & LOBJF_NO_CROSS) && lobj->mSize <= 256 && (start & 0xff00) != ((end - 1) & 0xff00) && !(lobj->mSection->mFlags & LSECF_PACKED))
+		if (((lobj->mFlags & LOBJF_NEVER_CROSS) || !(linker->mCompilerOptions & COPT_OPTIMIZE_CODE_SIZE) && (lobj->mFlags & LOBJF_NO_CROSS) && !(lobj->mSection->mFlags & LSECF_PACKED)) && lobj->mSize <= 256 && (start & 0xff00) != ((end - 1) & 0xff00))
 			;
 		else if (end <= mFreeChunks[i].mEnd)
 		{
@@ -685,7 +752,7 @@ bool LinkerRegion::Allocate(Linker * linker, LinkerObject* lobj, bool merge, boo
 	int start = (mStart + mUsed + lobj->mAlignment - 1) & ~(lobj->mAlignment - 1);
 	int end = start + lobj->mSize;
 
-	if (!(linker->mCompilerOptions & COPT_OPTIMIZE_CODE_SIZE) && !retry && (lobj->mFlags & LOBJF_NO_CROSS) && !(lobj->mFlags & LOBJF_FORCE_ALIGN) && lobj->mSize <= 256 && (start & 0xff00) != ((end - 1) & 0xff00) && !(lobj->mSection->mFlags & LSECF_PACKED))
+	if (((lobj->mFlags & LOBJF_NEVER_CROSS) || !(linker->mCompilerOptions & COPT_OPTIMIZE_CODE_SIZE) && !retry && (lobj->mFlags & LOBJF_NO_CROSS) && !(lobj->mSection->mFlags & LSECF_PACKED)) && !(lobj->mFlags & LOBJF_FORCE_ALIGN) && lobj->mSize <= 256 && (start & 0xff00) != ((end - 1) & 0xff00))
 	{
 		start = (start + 0x00ff) & 0xff00;
 		end = start + lobj->mSize;
@@ -755,8 +822,9 @@ void LinkerRegion::PlaceStackSection(LinkerSection* stackSection, LinkerSection*
 			LinkerObject* lobj = section->mObjects[i];
 			if (lobj->mFlags & LOBJF_REFERENCED)
 			{
-				section->mStart -= lobj->mSize;
-				section->mSize += lobj->mSize;
+				int start = (section->mStart - lobj->mSize) & ~(lobj->mAlignment - 1);
+				section->mSize += section->mStart - start;
+				section->mStart = start;
 
 				lobj->mFlags |= LOBJF_PLACED;
 				lobj->mAddress = section->mStart;
@@ -1516,7 +1584,7 @@ static uint32 flip32(uint32 d)
 	return uint32(flip16(uint16(d >> 16))) | (uint32(flip16(uint16(d))) << 16);
 }
 
-bool Linker::WriteCrtFile(const char* filename, uint16 id)
+bool Linker::WriteCrtFile(const char* filename, uint16 id, uint8 subtype, const char* cname)
 {
 	FILE* file;
 	fopen_s(&file, filename, "wb");
@@ -1529,7 +1597,8 @@ bool Linker::WriteCrtFile(const char* filename, uint16 id)
 			uint16	mVersion;
 			uint8	mIDHi, mIDLo;
 			uint8	mExrom, mGameLine;
-			uint8	mPad[6];
+			uint8	mSubType;
+			uint8	mPad[5];
 			char	mName[32];
 		}	criHeader = { 0 };
 
@@ -1538,6 +1607,7 @@ bool Linker::WriteCrtFile(const char* filename, uint16 id)
 		criHeader.mVersion = 0x0001;
 		criHeader.mIDHi = uint8(id >> 8);
 		criHeader.mIDLo = uint8(id & 0xff);
+		criHeader.mSubType = subtype;
 
 		if (mCompilerOptions & COPT_TARGET_CRT8)
 		{
@@ -1556,7 +1626,7 @@ bool Linker::WriteCrtFile(const char* filename, uint16 id)
 		}
 
 		memset(criHeader.mName, 0, 32);
-		strcpy_s(criHeader.mName, "OSCAR");
+		strcpy_s(criHeader.mName, cname);
 
 		fwrite(&criHeader, sizeof(CRIHeader), 1, file);
 
@@ -1946,6 +2016,8 @@ bool Linker::WriteDbjFile(FILE* file)
 	return true;
 }
 
+static const char hexchars[] = "0123456789abcdef";
+
 bool Linker::WriteLblFile(const char* filename)
 {
 	FILE* file;
@@ -1959,7 +2031,28 @@ bool Linker::WriteLblFile(const char* filename)
 			if (obj->mFlags & LOBJF_REFERENCED)
 			{
 				if (obj->mIdent)
-					fprintf(file, "al %04x .%s\n", obj->mAddress, obj->mIdent->mString);
+				{
+					char buffer[400];
+					char nbuffer[500];
+
+					strcpy_s(buffer, obj->mIdent->mString);
+					int i = 0, j = 0;
+					while (buffer[i])
+					{
+						if (buffer[i] >= '0' && buffer[i] <= '9' || buffer[i] >= 'a' && buffer[i] <= 'z' || buffer[i] >= 'A' && buffer[i] <= 'Z' || buffer[i] == '_' || buffer[i] == ':')
+							nbuffer[j++] = buffer[i];
+						else
+						{
+							nbuffer[j++] = '?';
+							nbuffer[j++] = hexchars[(buffer[i] >> 4) & 0x0f];
+							nbuffer[j++] = hexchars[buffer[i] & 0x0f];
+
+						}
+						i++;
+					}
+					nbuffer[j] = 0;
+					fprintf(file, "al %04x .%s\n", obj->mAddress, nbuffer);
+				}
 			}
 		}
 

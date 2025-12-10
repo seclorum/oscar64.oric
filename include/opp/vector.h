@@ -21,13 +21,14 @@ public:
 	vector(size_t n) : _data((T*)malloc(n * sizeof(T))), _size(n), _capacity(n) 
 	{
 		for(size_t i=0; i<n; i++)
-			new (_data + i) T;
+			new (_data + i) T();
 	}
 
 	vector(const vector & v)
 		: _data((T*)malloc(v._size * sizeof(T))), _size(v._size), _capacity(v._size) 
 	{
-		for(size_t i=0; i<_size; i++)
+		size_t n = _size;
+		for(size_t i=0; i<n; i++)
 			new (_data + i)T(v._data[i]);
 	}
 
@@ -50,14 +51,16 @@ public:
 	{
 		if (this != &v)
 		{
-			for(size_t i=0; i<_size; i++)
+			size_t n = _size;
+			for(size_t i=0; i<n; i++)
 				_data[i].~T();
 			free(_data);
 
 			_data = (T*)malloc(v._size * sizeof(T));
 			_size = v._size; 
 			_capacity = v._size; 
-			for(size_t i=0; i<_size; i++)
+			n = _size;
+			for(size_t i=0; i<n; i++)
 				new (_data + i)T(v._data[i]);		
 		}
 		return *this;
@@ -93,6 +96,8 @@ public:
 	{
 		return _capacity;
 	}
+
+	void clear(void);
 
 	void resize(size_t n);
 
@@ -190,6 +195,8 @@ public:
 		_data[_size].~T();
 	}
 
+	void assign(size_t count, const T & t);
+
 	void insert(size_t at, const T & t);
 
 	void erase(size_t at, size_t n = 1);
@@ -204,7 +211,7 @@ protected:
 
 
 template <class T>
-void vector<T>::reserve(size_t n)
+__noinline void vector<T>::reserve(size_t n)
 {
 	if (n > _capacity)
 	{
@@ -221,7 +228,15 @@ void vector<T>::reserve(size_t n)
 }
 
 template <class T>
-void vector<T>::resize(size_t n)
+void vector<T>::clear(void)
+{
+	for(size_t i=0; i<_size; i++)
+		_data[i].~T();			
+	_size = 0;
+}
+
+template <class T>
+__noinline void vector<T>::resize(size_t n)
 {
 	if (n < _size)
 	{
@@ -232,7 +247,7 @@ void vector<T>::resize(size_t n)
 	else if (n < _capacity)
 	{
 		for(size_t i=_size; i<n; i++)
-			new(_data + i)T;
+			new(_data + i)T();
 		_size = n;
 	}
 	else
@@ -287,11 +302,26 @@ void vector<T>::emplace_back(const P&... p)
 }
 
 template <class T>
+void vector<T>::assign(size_t count, const T & t)
+{
+	for(size_t i=0; i<_size; i++)
+		_data[i].~T();
+	if (count > _capacity)
+	{
+		_size = 0;
+		reserve(count);		
+	}
+	for(size_t i=0; i<count; i++)
+		new (_data + i)T(t);
+	_size = count;
+}
+
+template <class T>
 void vector<T>::insert(size_t at, const T & t)
 {
 	if (_size == _capacity)
 		reserve(_size + 1 + (_size >> 1));
-	new (_data + _size)T;
+	new (_data + _size)T();
 	for(size_t i=_size; i>at; i--)
 		_data[i] = move(_data[i - 1]);
 	_data[at] = t;
@@ -318,7 +348,7 @@ T * vector<T>::insert(T * at, const T & t)
 		at = (T *)(f + unsigned(_data));
 	}
 	T * dp = _data + _size;
-	new (dp)T;
+	new (dp)T();
 	while (dp != at)
 	{
 		dp--;

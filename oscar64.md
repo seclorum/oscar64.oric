@@ -28,7 +28,7 @@ In the end, it turned out that the native code is not only significantly faster 
  
 ## Limits and Errors
 
-There are still several open areas, but most targets have been reached.  The current Dhrystone performance is 94 iterations per second with byte code (10993) and 405 iterations with native code (9173 Bytes).  This clearly shows that Dhrystone is not a valid benchmark for optimizing compilers, because it puts the 6502 on par with a 4MHz 8088 or 68k, which it clearly is not.
+There are still several open areas, but most targets have been reached.  The current Dhrystone performance is 94 iterations per second with byte code (10993) and 442 iterations with native code (8952 Bytes).  This clearly shows that Dhrystone is not a valid benchmark for optimizing compilers, because it puts the 6502 on par with a 4MHz 8088 or 68k, which it clearly is not.
 
 ### Language
 
@@ -110,6 +110,7 @@ The compiler is command line driven, and creates an executable .prg file.
 * -v : verbose output for diagnostics
 * -v2 : more verbose output
 * -i : additional include paths
+* -ii : set default include path
 * -o : optional output file name
 * -rt : alternative runtime library, replaces the crt.c (or empty for none)
 * -e : execute the result in the integrated emulator
@@ -129,6 +130,7 @@ The compiler is command line driven, and creates an executable .prg file.
 * -Oz : enable auto placement of global variables in zero page (part of O3)
 * -Op : optimize constant parameters
 * -Oo : optimize size using "outliner" (extract repeated code sequences into functions)
+* -Ox : optimize pointer arithmetic by blocking shorter arrays to not cross page boundaries
 * -g : create source level debug info and add source line numbers to asm listing
 * -gp : create source level debug info and add source line numbers to asm listing and static profile data
 * -tf : target format, may be prg, crt or bin
@@ -139,6 +141,8 @@ The compiler is command line driven, and creates an executable .prg file.
 * -fi : sector skip for data files on disk image
 * -xz : extended zero page usage, more zero page space, but no return to basic
 * -cid : cartridge type ID, used by vice emulator
+* -csub : cartridge sub type
+* -cname : cartridge name
 * -pp : compile in C++ mode
 * -strict : use strict ANSI C parsing (no C++ goodies)
 * -psci : use PETSCII encoding for all strings without prefix
@@ -159,6 +163,7 @@ A list of source files can be provided.
 * c64 : Commodore C64, (0x0800..0xa000)
 * c128 : Commodore C128, memory range (0x1c00..0xfc00)
 * c128b : Commodore C128, first 16KB only (0x1c00..0x4000)
+* c128e : Commodore C128, first 48KB only (0x1c00..0xc000)
 * plus4 : Commodore PLUS4, (0x1000..0xfc00)
 * vic20: Commodore VIC20, no extra memory (0x1000..0x1e00)
 * vic20+3 : Commodore VIC20, 3K RAM expansion (0x0400..0x1e00)
@@ -175,6 +180,7 @@ A list of source files can be provided.
 * nes_mmc3 : Nintendo entertainment system, MMC3, 512K PROM, 256K CROM
 * atari : Atari 8bit systems, (0x2000..0xbc00)
 * x16 : Commander X16, (0x0800..0x9f00)
+* mega65 : Mega 65, (0x2000..0xc000)
 
 ### C64 Cartridge formats
 
@@ -333,6 +339,17 @@ The .asm file is a great resource when debugging from within e.g. the VICE monit
 # Language extensions
 
 The compiler has various extensions to simplify developing for the C64.
+
+## Pragmas
+
+Warnings can be turned on or off using the warning pragma.  The scope of the pragma is currently global in most cases, so if it is turned off at some place, it is off everywhere.
+
+	#pragma warning(disable: 2000,2001)
+
+A message can be displayed during compilation with the message pragma
+
+	#pragma message("Hello User")
+	
 
 ## Embedding binary data
 
@@ -737,6 +754,11 @@ Regions can also be used to place assets such as character sets at fixed locatio
 
 The #pragma data(), #pragma code() and #pragma bss() control the placement of the generated objects into sections other than the default sections.
 
+A global variable or function can be aligned on a given power of two start with the align pragma.  This is most useful if a page crossing is problematic.  The compiler may also be able to generate more efficient code, if a larger variable is page aligned.
+
+	#pragma align(myvar, 8)
+	#pragma align(myfunc, 256)
+		
 ### Additional BSS sections
 
 Additional bss sections can be defined on request.
@@ -934,6 +956,11 @@ The compiler provides two levels of interrupt safe functions.  The specifier __i
 
 		return 0
 	}
+	
+### Assembler optimizer
+
+The compiler uses various optimizations on inline assembler that may not have the expected result in all cases.  The optimizer can be disabled for a range of code with e.g. #pragma optimize(noasm) or for an individual __asm statement by using __asm volatile {}.
+The assembler optimizer is enabled with optimization levels O2 and up.
 	
 # Helping the compiler optimizing
 

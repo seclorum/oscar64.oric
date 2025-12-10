@@ -145,27 +145,33 @@ public:
 	void AddObject(LinkerObject* obj);
 };
 
-static const uint32 LOBJF_REFERENCED	= 0x00000001;
-static const uint32 LOBJF_PLACED		= 0x00000002;
-static const uint32 LOBJF_NO_FRAME		= 0x00000004;
-static const uint32 LOBJF_INLINE		= 0x00000008;
-static const uint32 LOBJF_CONST			= 0x00000010;
-static const uint32 LOBJF_RELEVANT		= 0x00000020;
-static const uint32 LOBJF_STATIC_STACK	= 0x00000040;
-static const uint32 LOBJF_NO_CROSS		= 0x00000080;
-static const uint32 LOBJF_ZEROPAGE		= 0x00000100;
-static const uint32 LOBJF_FORCE_ALIGN	= 0x00000200;
-static const uint32 LOBJF_ZEROPAGESET = 0x00000400;
+static const uint32 LOBJF_REFERENCED		= 0x00000001;
+static const uint32 LOBJF_PLACED			= 0x00000002;
+static const uint32 LOBJF_NO_FRAME			= 0x00000004;
+static const uint32 LOBJF_INLINE			= 0x00000008;
+static const uint32 LOBJF_CONST				= 0x00000010;
+static const uint32 LOBJF_RELEVANT			= 0x00000020;
+static const uint32 LOBJF_STATIC_STACK		= 0x00000040;
+static const uint32 LOBJF_NO_CROSS			= 0x00000080;
+static const uint32 LOBJF_ZEROPAGE			= 0x00000100;
+static const uint32 LOBJF_FORCE_ALIGN		= 0x00000200;
+static const uint32 LOBJF_ZEROPAGESET		= 0x00000400;
+static const uint32 LOBJF_NEVER_CROSS		= 0x00000800;
 
-static const uint32 LOBJF_ARG_REG_A = 0x00001000;
-static const uint32 LOBJF_ARG_REG_X = 0x00002000;
-static const uint32 LOBJF_ARG_REG_Y = 0x00004000;
+static const uint32 LOBJF_ARG_REG_A			= 0x00001000;
+static const uint32 LOBJF_ARG_REG_X			= 0x00002000;
+static const uint32 LOBJF_ARG_REG_Y			= 0x00004000;
 
-static const uint32 LOBJF_RET_REG_A = 0x00010000;
-static const uint32 LOBJF_RET_REG_X = 0x00020000;
+static const uint32 LOBJF_RET_REG_A			= 0x00010000;
+static const uint32 LOBJF_RET_REG_X			= 0x00020000;
+static const uint32 LOBJF_RET_REG_Y			= 0x00040000;
 
-static const uint32 LOBJF_LOCAL_VAR = 0x00100000;
-static const uint32 LOBJF_LOCAL_USED = 0x00200000;
+static const uint32 LOBJF_PRESERVE_REG_A	= 0x00100000;
+static const uint32 LOBJF_PRESERVE_REG_X	= 0x00200000;
+static const uint32 LOBJF_PRESERVE_REG_Y	= 0x00400000;
+
+static const uint32 LOBJF_LOCAL_VAR = 0x01000000;
+static const uint32 LOBJF_LOCAL_USED = 0x02000000;
 
 class LinkerObjectRange
 {
@@ -190,11 +196,11 @@ public:
 	LinkerObjectType					mType;
 	int									mID, mMapID;
 	int									mAddress, mRefAddress;
-	int									mSize, mAlignment, mStartUsed, mEndUsed;
+	int									mSize, mAlignment, mStripe, mStartUsed, mEndUsed;
 	LinkerSection					*	mSection;
 	LinkerRegion					*	mRegion;
 	uint8							*	mData, * mMemory;
-	InterCodeProcedure				*	mProc;
+	InterCodeProcedure				*	mProc, * mOwnerProc;
 	NativeCodeProcedure				*	mNativeProc;
 	InterVariable					*	mVariable;
 	uint32								mFlags;
@@ -206,14 +212,17 @@ public:
 	int									mSuffixReference;
 
 	ExpandingArray<LinkerObjectRange>	mRanges;
-	ExpandingArray<CodeLocation>		mCodeLocations;
+	ExpandingArray<CodeLocation>		mCodeLocations, mCodeOrigins;
 	ExpandingArray<LinkerObjectRange>	mZeroPageRanges;
 
 	LinkerObject(void);
 	~LinkerObject(void);
 
+	LinkerObject* CloneAssembler(Linker * linker) const;
+
 	void AddData(const uint8* data, int size);
 	void AddLocations(const ExpandingArray<CodeLocation>& locations);
+	void AddOrigins(const ExpandingArray<CodeLocation>& locations);
 	uint8* AddSpace(int size);
 	void EnsureSpace(int offset, int size);
 
@@ -258,8 +267,9 @@ public:
 
 	LinkerRegion* FindRegionOfSection(LinkerSection* section);
 
-	LinkerObject* FindObjectByAddr(int addr);
-	LinkerObject* FindObjectByAddr(int bank, int addr);
+	LinkerObject* FindObjectByAddr(int addr, InterCodeProcedure* proc = nullptr);
+	LinkerObject* FindObjectByAddr(int bank, int addr, InterCodeProcedure * proc = nullptr);
+	LinkerObject* FindObjectByName(const char* name);
 
 	bool IsSectionPlaced(LinkerSection* section);
 
@@ -279,7 +289,7 @@ public:
 	bool WriteMapFile(const char* filename);
 	bool WriteAsmFile(const char* filename, const char * version);
 	bool WriteLblFile(const char* filename);
-	bool WriteCrtFile(const char* filename, uint16 id);
+	bool WriteCrtFile(const char* filename, uint16 id, uint8 subtype, const char * cname);
 	bool WriteBinFile(const char* filename);
 	bool WriteNesFile(const char* filename, TargetMachine machine);
 	bool WriteMlbFile(const char* filename, TargetMachine machine);

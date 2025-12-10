@@ -360,3 +360,5 @@ cmake-build-debug/**
 cmake-build-release/**
 # Hand-made build diectory when using cmake at cmd-line
 build/**
+.clang-format
+*.csz

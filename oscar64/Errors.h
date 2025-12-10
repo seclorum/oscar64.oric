@@ -1,5 +1,8 @@
 #pragma once
 
+#include "NumberSet.h"
+
+
 class Location
 {
 public:
@@ -10,7 +13,11 @@ public:
 	Location() : mFileName(nullptr), mLine(0), mColumn(0), mFrom(nullptr) {}
 	Location(const Location& loc, const Location* from)
 		: mFileName(loc.mFileName), mLine(loc.mLine), mColumn(loc.mColumn), mFrom(from)
-	{}
+	{
+		static volatile int k;
+		if (from)
+			k = from->mLine;
+	}
 };
 
 class Ident;
@@ -45,6 +52,8 @@ enum ErrorID
 	EWARN_INSUFFICIENT_MEMORY,
 	EWARN_FUNCTION_NOT_INLINED,
 	EWARN_INVALID_VOID_POINTER_ARITHMETIC,
+	EWARN_DIVISION_BY_ZERO,
+	EWARN_EXPAND_UNDEFINED_MACRO_IDENT,
 
 	EERR_GENERIC = 3000,
 	EERR_FILE_NOT_FOUND,
@@ -76,6 +85,7 @@ enum ErrorID
 	EERR_ASM_INVALD_OPERAND,
 	EERR_ASM_INVALID_INSTRUCTION,
 	EERR_ASM_INVALID_MODE,
+	EERR_ASM_INVALID_REGISTER,
 	EERR_PRAGMA_PARAMETER,
 	ERRR_PREPROCESSOR,
 	ERRR_INVALID_CASE,
@@ -114,14 +124,21 @@ enum ErrorID
 	ERRR_INVALID_NUMBER,
 	EERR_OVERLAPPING_DATA_SECTIONS,
 	EERR_ASSEMBLER_LIMIT,
+	EERR_SECTION_ON_IN_REGION,
 
 	EERR_INVALID_PREPROCESSOR,
 	EERR_INVALID_CLASS_INITIALIZER,
 	EERR_CALL_OF_DELETED_FUNCTION,
 
+	EERR_STATIC_ASSERT,
+
+	ERRR_INVALID_STRUCT_BINDING_TYPE,
+
 	EFATAL_GENERIC = 4000,
 	EFATAL_OUT_OF_MEMORY,
 	EFATAL_MACRO_EXPANSION_DEPTH,
+
+	ERROR_MAX = 5000
 };
 
 class Errors
@@ -129,7 +146,12 @@ class Errors
 public:
 	Errors(void);
 
+	ErrorID	SetMinLevel(ErrorID id);
+
 	int		mErrorCount;
+	ErrorID	mMinLevel;
+
+	NumberSet	mDisabled;
 
 	void Error(const Location& loc, ErrorID eid, const char* msg, const Ident* info1, const Ident* info2 = nullptr);
 	void Error(const Location& loc, ErrorID eid, const char* msg, const char* info1 = nullptr, const char* info2 = nullptr);

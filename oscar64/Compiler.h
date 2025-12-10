@@ -33,6 +33,8 @@ public:
 	TargetMachine	mTargetMachine;
 	uint64			mCompilerOptions;
 	uint16			mCartridgeID;
+	uint8			mCartridgeSubType;
+	char			mCartridgeName[32];
 	char			mVersion[32];
 
 	struct Define
@@ -49,7 +51,7 @@ public:
 	bool WriteOutputFile(const char* targetPath, DiskImage * d64);
 	bool WriteErrorFile(const char* targetPath);
 	bool RemoveErrorFile(const char* targetPath);
-	int ExecuteCode(bool profile, int trace);
+	int ExecuteCode(bool profile, int trace, bool asserts);
 
 	void AddDefine(const Ident* ident, const char* value);
 

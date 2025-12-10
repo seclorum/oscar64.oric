@@ -11,11 +11,8 @@ void itoa(int n, char * s, unsigned radix)
 	
 	char	i = 0;
     do {
-		unsigned	d = un % radix;
-		if (d < 10)
-			d += '0';
-		else
-			d += 'A' - 10;
+		char	d = un % radix;
+		d += d < 10 ? '0' : 'A' - 10;;
 		s[i++] = d;
     } while ((un /= radix) > 0);
 
@@ -37,11 +34,8 @@ void utoa(unsigned int n, char * s, unsigned radix)
 {	
 	char	i = 0;
     do {
-		unsigned int	d = n % radix;
-		if (d < 10)
-			d += '0';
-		else
-			d += 'A' - 10;
+		char	d = n % radix;
+		d += d < 10 ? '0' : 'A' - 10;;
 		s[i++] = d;
     } while ((n /= radix) > 0);
 
@@ -65,11 +59,8 @@ void ltoa(long n, char * s, unsigned radix)
 	
 	char	i = 0;
     do {
-		int	d = n % radix;
-		if (d < 10)
-			d += '0';
-		else
-			d += 'A' - 10;
+		char	d = n % radix;
+		d += d < 10 ? '0' : 'A' - 10;;
 		s[i++] = d;
     } while ((n /= radix) > 0);
 
@@ -91,11 +82,8 @@ void ultoa(unsigned long n, char * s, unsigned radix)
 {	
 	char	i = 0;
     do {
-		unsigned int	d = n % radix;
-		if (d < 10)
-			d += '0';
-		else
-			d += 'A' - 10;
+		char	d = n % radix;
+		d += d < 10 ? '0' : 'A' - 10;;
 		s[i++] = d;
     } while ((n /= radix) > 0);
 
@@ -206,6 +194,34 @@ int atoi(const char * s)
 		c = *s++;
 	
 	int	v = 0;
+	while (c >= '0' && c <= '9')
+	{
+		v = v * 10 + (c - '0');
+		c = *s++;
+	}
+	
+	if (neg)
+		v = -v;
+	
+	return v;		
+}
+
+long atol(const char * s)
+{
+	char	c;
+	while ((c = *s++) <= ' ')
+		if (!c) return 0;
+	
+	bool neg = false;
+	if (c == '-')
+	{
+		neg = true;
+		c = *s++;
+	}
+	else if (c == '+')
+		c = *s++;
+	
+	long	v = 0;
 	while (c >= '0' && c <= '9')
 	{
 		v = v * 10 + (c - '0');
@@ -504,6 +520,42 @@ long labs(long n)
 	return n < 0 ? - n : n;	
 }
 
+div_t div(int numer, int denom)
+{
+	div_t result;
+
+	if (denom == 0)
+	{
+		result.quot = 0;
+		result.rem = 0;
+	}
+	else
+	{
+		result.quot = numer / denom;
+		result.rem = numer % denom;
+	}
+	
+	return result;
+}
+
+ldiv_t ldiv(long int numer, long int denom)
+{
+	ldiv_t result;
+
+	if (denom == 0)
+	{
+		result.quot = 0;
+		result.rem = 0;
+	}
+	else
+	{
+		result.quot = numer / denom;
+		result.rem = numer % denom;
+	}
+	
+	return result;
+}
+
 void exit(int status)
 {
 	__asm
@@ -544,7 +596,7 @@ unsigned heapfree(void)
 }
 
 #if 0
-struct Heap {
+struct Heap {q
 	unsigned int	size;
 	Heap		*	next;
 }	*	freeHeap;
@@ -667,7 +719,99 @@ void * calloc(int num, int size)
 	return p;
 }
 
+void * realloc(void * ptr, unsigned size)
+{
+	if (ptr)
+	{
+#ifdef HEAPCHECK
+		Heap	*	pheap = (Heap *)((char *)ptr - 6);
+		Heap	*	eheap = pheap->next;
+
+		unsigned	psize = (char *)eheap - (char *)pheap;
+
+		void * nptr = malloc(size);
+		memcpy(nptr, ptr, psize - 6);
+		free(ptr);
+		return nptr;
+#else
+		unsigned	nsize = (size + 5) & ~3;
+
+		// Get heap info
+		Heap	*	pheap = (Heap *)((char *)ptr - 2);
+		Heap	*	eheap = pheap->next;
+
+		unsigned	psize = (char *)eheap - (char *)pheap;
+
+		Heap	*	h = HeapNode.next;
+		Heap	*	hp = &HeapNode;
+		while (h && h < pheap)
+		{
+			hp = h;
+			h = h->next;
+		}		
+
+		if (nsize <= psize)
+		{
+			// check if we should free some memory
+			if (nsize + sizeof(HeapNode) < psize)
+			{
+				Heap	*	nheap = (Heap *)((char *)pheap + nsize);
+				pheap->next = nheap;
+
+				if (h == eheap)
+				{
+					nheap->end = h->end;
+					nheap->next = h->next;
+				}
+				else 
+				{
+					nheap->end = eheap;
+					nheap->next = h;
+				}
+
+				hp->next = nheap;
+			}
+
+			return ptr;
+		}
+		else if (h == eheap)
+		{
+			// Free space after this
+
+			// Check if enough space if extending
+			unsigned	xsize = (char *)h->end - (char *)pheap;
+			if (xsize >= nsize)
+			{
+				if (xsize > nsize + sizeof(HeapNode))
+				{
+					Heap	*	nheap = (Heap *)((char *)pheap + nsize);
+					pheap->next = nheap;
+					nheap->end = h->end;
+					nheap->next = h->next;
+					hp->next = nheap;
+				}
+				else
+				{
+					pheap->next = h->end;
+					hp->next = h->next;
+				}
+
+				return ptr;
+			}
+		}
+
+		void * nptr = malloc(size);
+		memcpy(nptr, ptr, psize - 2);
+		free(ptr);
+		return nptr;
+#endif		
+	}
+	else
+		return malloc(size);
+}
+
 static unsigned seed = 31232;
+static unsigned seedl = 321432142412;
 
 unsigned int rand(void)
 {
@@ -680,4 +824,17 @@ unsigned int rand(void)
 void srand(unsigned int s)
 {
 	seed = s;
+}
+
+unsigned long lrand(void)
+{
+	seedl ^= seedl << 13;
+	seedl ^= seedl >> 17;
+	seedl ^= seedl << 5;
+	return seedl;
+}
+
+void lsrand(unsigned long s)
+{
+	seedl = s;
 }

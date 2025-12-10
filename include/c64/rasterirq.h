@@ -46,6 +46,8 @@ enum RIRQCodeIndex
 	RIRQ_DATA_10 = 56,
 	RIRQ_ADDR_10 = 58,
 
+	RIRQ_SIZE_10 = 61,
+
 	RIRQ_DATA_11 = 61,
 	RIRQ_ADDR_11 = 63,
 
@@ -102,7 +104,13 @@ typedef struct RIRQCode
 	byte		code[RIRQ_SIZE];
 } RIRQCode;
 
-typedef struct RQIRCode20
+typedef struct RIRQCode10
+{	
+	RIRQCode	c;
+	byte		code[RIRQ_SIZE_10 - RIRQ_SIZE];
+} RIRQCode10;
+
+typedef struct RIRQCode20
 {
 	RIRQCode	c;
 	byte		code[RIRQ_SIZE_20 - RIRQ_SIZE];	
@@ -154,7 +162,7 @@ void rirq_init_kernal(void);
 
 // Raster IRQ through kernal, with IO range not always enabled
 // calls kernal continuation
-void rirq_init_kernal_io(void);
+void rirq_init_kernal_noio(void);
 
 // Raster IRQ through RAM and ROM vector, with ROM disabled or not and IO range always enabled
 // does not call kernal continuation
@@ -162,7 +170,7 @@ void rirq_init_crt(void);
 
 // Raster IRQ through RAM and ROM vector, with ROM disabled or not and IO range not always enabled
 // does not call kernal continuation
-void rirq_init_crt_io(void);
+void rirq_init_crt_noio(void);
 
 // Raster IRQ through RAM vector, with ROM disabled and IO range always enabled
 // does not call kernal continuation
@@ -179,12 +187,14 @@ void rirq_start(void);
 void rirq_stop(void);
 
 // Sort the raster IRQ, must be performed at the end of the frame after changing 
-// the vertical position of one of the interrupt operatins.
+// the vertical position of one of the interrupt operations.
 // Set the inirq flag to true when calling this from an interrupt
 void rirq_sort(bool inirq = false);
 
 // Wait for the last raster IRQ op to have completed.  Must be called before a
 // sort if the raster IRQ system is active
+void rirq_wait_done(void);
+
 void rirq_wait(void);
 
 #pragma compile("rasterirq.c")

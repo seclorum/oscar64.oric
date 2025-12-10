@@ -6,7 +6,7 @@
 #include "NumberSet.h"
 
 Parser::Parser(Errors* errors, Scanner* scanner, CompilationUnits* compilationUnits)
-	: mErrors(errors), mScanner(scanner), mCompilationUnits(compilationUnits)
+	: mErrors(errors), mScanner(scanner), mCompilationUnits(compilationUnits), mParent(nullptr)
 {
 	mGlobals = new DeclarationScope(compilationUnits->mScope, SLEVEL_STATIC);
 	mScope = mGlobals;
@@ -95,6 +95,27 @@ Declaration * Parser::AddMemberFunction(Declaration* dec, Declaration* mdec)
 	Declaration* pmdec = FindBaseMemberFunction(dec, mdec);
 	if (pmdec)
 		mdec->mBase->mFlags |= pmdec->mBase->mFlags & DTF_VIRTUAL;
+
+	const Ident* dtorident = dec->mIdent->PreMangle("~");;
+	const Ident* ctorident = dec->mIdent->PreMangle("+");;
+
+	if (mdec->mIdent == ctorident)
+	{
+		// Check constructors
+		Declaration* ctdec = mdec->mBase;
+		Declaration* tparam = ctdec->mParams->mNext;
+
+		if (!tparam && !dec->mDefaultConstructor)
+			dec->mDefaultConstructor = mdec;
+		else if (tparam && !tparam->mNext && tparam->mBase->mType == DT_TYPE_REFERENCE && dec->IsConstSame(tparam->mBase->mBase) && !dec->mCopyConstructor)
+			dec->mCopyConstructor = mdec;
+		else if (tparam && !tparam->mNext && tparam->mBase->mType == DT_TYPE_RVALUEREF && dec->IsConstSame(tparam->mBase->mBase) && !dec->mMoveConstructor)
+			dec->mMoveConstructor = mdec;
+	}
+	else if (mdec->mIdent == dtorident && !dec->mDestructor)
+	{
+		dec->mDestructor = mdec;
+	}
 
 	Declaration* gdec = mCompilationUnits->mScope->Insert(mdec->mQualIdent, mdec);
 	if (gdec)
@@ -303,6 +324,10 @@ Declaration* Parser::ParseStructDeclaration(uint64 flags, DecType dt, Declaratio
 				{
 					Declaration	*	tdec = ParseTemplateDeclaration(pthis);
 				}
+				else if (ConsumeTokenIf(TK_STATIC_ASSERT))
+				{
+					ParseStaticAssert();
+				}
 				else
 				{
 					Declaration* mdec = ParseDeclaration(nullptr, false, false, true, pthis);
@@ -358,6 +383,29 @@ Declaration* Parser::ParseStructDeclaration(uint64 flags, DecType dt, Declaratio
 									mdec->mFlags |= DTF_GLOBAL;
 									mdec->mVarIndex = -1;
 									mdec->mQualIdent = mScope->Mangle(mdec->mIdent);
+
+									if (mdec->mValue && (mdec->mBase->mFlags & DTF_CONST))
+									{
+										if (mdec->mBase->IsNumericType())
+										{
+											if (mdec->mValue->mType == EX_CONSTANT)
+											{
+												mdec->mType = mdec->mValue->mDecValue->mType;
+												mdec->mInteger = mdec->mValue->mDecValue->mInteger;
+											}
+										}
+										else if (dec->mBase->mType == DT_TYPE_POINTER)
+										{
+											if (dec->mValue->mType == EX_CONSTANT)
+											{
+												if (dec->mValue->mDecValue->mType == DT_CONST_ADDRESS || dec->mValue->mDecValue->mType == DT_CONST_POINTER)
+												{
+													mdec->mType = mdec->mValue->mDecValue->mType;
+													mdec->mInteger = mdec->mValue->mDecValue->mInteger;
+												}
+											}
+										}
+									}
 
 									Declaration * pdec = mCompilationUnits->mScope->Insert(mdec->mQualIdent, mdec);
 
@@ -488,13 +536,30 @@ Declaration* Parser::ParseStructDeclaration(uint64 flags, DecType dt, Declaratio
 											}
 										}
 
+										if (mdec->mBits == 24 && mdec->mOffset > 0 && mdec->mShift == 0)
+										{
+											mdec->mOffset--;
+											mdec->mShift = 8;
+										}
+
 										if (mdec->mShift == 0 && mdec->mBits == 8 * mdec->mSize)
 											mdec->mBits = 0;
 									}
 									else
 									{
+										int alignment = mdec->mBase->mAlignment;
+										if (alignment == 0)
+											alignment = 1;
+
 										bitsleft = 0;
+										if (mdec->mBase->mType == DT_TYPE_ARRAY && mdec->mBase->mBase->IsSimpleType() && mdec->mBase->mBase->mSize > 1)
+											alignment = mdec->mBase->mBase->mSize;
+
+										offset = (offset + alignment - 1) & ~(alignment - 1);
 										offset += mdec->mBase->mSize;
+
+										if (alignment > dec->mAlignment)
+											dec->mAlignment = alignment;
 									}
 
 									if (offset > dec->mSize)
@@ -674,6 +739,7 @@ Declaration* Parser::ParseStructDeclaration(uint64 flags, DecType dt, Declaratio
 				pthis->mBase->mConst->mVectorConstructor = pthis->mBase->mVectorConstructor;
 				pthis->mBase->mConst->mVectorDestructor = pthis->mBase->mVectorConstructor;
 				pthis->mBase->mConst->mVectorCopyConstructor = pthis->mBase->mVectorCopyConstructor;
+				pthis->mBase->mConst->mVectorMoveConstructor = pthis->mBase->mVectorMoveConstructor;
 			}
 
 			// Lookup constructors, have same name as class
@@ -801,6 +867,14 @@ Declaration* Parser::ParseBaseTypeDeclaration(uint64 flags, bool qualified, Decl
 		mScanner->NextToken();
 		return ParseBaseTypeDeclaration(flags | DTF_VOLATILE, qualified);
 
+	case TK_MEMMAP:
+		mScanner->NextToken();
+		return ParseBaseTypeDeclaration(flags | DTF_MEMMAP, qualified);
+
+	case TK_TYPENAME:
+		mScanner->NextToken();
+		return ParseBaseTypeDeclaration(flags, qualified);
+
 	case TK_LONG:
 		dec = new Declaration(mScanner->mLocation, DT_TYPE_INTEGER);
 		dec->mSize = 4;
@@ -877,7 +951,19 @@ Declaration* Parser::ParseBaseTypeDeclaration(uint64 flags, bool qualified, Decl
 	}
 		break;
 
+	case TK_COLCOLON:
 	case TK_IDENT:
+	{
+		DeclarationScope* scope = mScope;
+		if (mScanner->mToken == TK_COLCOLON)
+		{
+			mScanner->NextToken();
+			while (scope->mLevel > SLEVEL_STATIC)
+				scope = scope->mParent;
+			if (!ExpectToken(TK_IDENT))
+				break;
+		}
+
 		pident = mScanner->mTokenIdent;
 		mScanner->NextToken();
 
@@ -964,6 +1050,7 @@ Declaration* Parser::ParseBaseTypeDeclaration(uint64 flags, bool qualified, Decl
 			mErrors->Error(mScanner->mLocation, EERR_OBJECT_NOT_FOUND, "Identifier not defined", pident);
 
 		break;
+	}
 
 	case TK_ENUM:
 	{
@@ -972,7 +1059,7 @@ Declaration* Parser::ParseBaseTypeDeclaration(uint64 flags, bool qualified, Decl
 		dec->mSize = 1;
 		dec->mScope = new DeclarationScope(nullptr, SLEVEL_CLASS);
 
-		bool	classTemplate = false;
+		bool	classTemplate = false, baseClass = false;
 
 		mScanner->NextToken();
 
@@ -1005,6 +1092,7 @@ Declaration* Parser::ParseBaseTypeDeclaration(uint64 flags, bool qualified, Decl
 				{
 					dec->mSize = pdec->mSize;
 					dec->mFlags |= pdec->mFlags & DTF_SIGNED;
+					baseClass = true;
 				}
 				else
 					mErrors->Error(pdec->mLocation, EERR_INCOMPATIBLE_TYPES, "Integer base type expected");
@@ -1060,7 +1148,11 @@ Declaration* Parser::ParseBaseTypeDeclaration(uint64 flags, bool qualified, Decl
 					dec->mParams = cdec;
 
 					if (mScanner->mToken == TK_COMMA)
+					{
 						mScanner->NextToken();
+						if (mScanner->mToken == TK_CLOSE_BRACE)
+							break;
+					}
 					else
 						break;
 				}
@@ -1070,13 +1162,33 @@ Declaration* Parser::ParseBaseTypeDeclaration(uint64 flags, bool qualified, Decl
 
 				if (minValue < 0)
 				{
-					dec->mFlags |= DTF_SIGNED;
-					if (minValue < -128 || maxValue > 127)
-						dec->mSize = 2;
+					if (baseClass)
+					{
+						if (dec->mFlags & DTF_SIGNED)
+						{
+							if (minValue < -128 && dec->mSize == 1)
+								mErrors->Error(mScanner->mLocation, EWARN_INVALID_VALUE_RANGE, "Enum constant out of bounds");
+						}
+						else
+							mErrors->Error(mScanner->mLocation, EWARN_INVALID_VALUE_RANGE, "Enum constant out of bounds");
+					}
+					else
+					{
+						dec->mFlags |= DTF_SIGNED;
+						if (minValue < -128 || maxValue > 127)
+							dec->mSize = 2;
+					}
 				}
 				else if (maxValue > 255)
-					dec->mSize = 2;
-
+				{
+					if (baseClass)
+					{
+						if (dec->mSize == 1)
+							mErrors->Error(mScanner->mLocation, EWARN_INVALID_VALUE_RANGE, "Enum constant out of bounds");
+					}
+					else
+						dec->mSize = 2;
+				}
 			}
 
 			if (mScanner->mToken == TK_CLOSE_BRACE)
@@ -1121,7 +1233,7 @@ Declaration* Parser::ParseBaseTypeDeclaration(uint64 flags, bool qualified, Decl
 
 }
 
-Declaration* Parser::ParsePostfixDeclaration(void)
+Declaration* Parser::ParsePostfixDeclaration(bool autoBase)
 {
 	Declaration* dec;
 
@@ -1146,11 +1258,16 @@ Declaration* Parser::ParsePostfixDeclaration(void)
 				ndec->mFlags |= DTF_VOLATILE;
 				mScanner->NextToken();
 			}
+			else if (mScanner->mToken == TK_MEMMAP)
+			{
+				ndec->mFlags |= DTF_MEMMAP;
+				mScanner->NextToken();
+			}
 			else
 				break;
 		}
 
-		Declaration* dec = ParsePostfixDeclaration();
+		Declaration* dec = ParsePostfixDeclaration(false);
 		ndec->mBase = dec;
 		return ndec;
 	}
@@ -1174,11 +1291,16 @@ Declaration* Parser::ParsePostfixDeclaration(void)
 				ndec->mFlags |= DTF_VOLATILE;
 				mScanner->NextToken();
 			}
+			else if (mScanner->mToken == TK_MEMMAP)
+			{
+				ndec->mFlags |= DTF_MEMMAP;
+				mScanner->NextToken();
+			}
 			else
 				break;
 		}
 
-		Declaration* dec = ParsePostfixDeclaration();
+		Declaration* dec = ParsePostfixDeclaration(autoBase);
 		ndec->mBase = dec;
 		return ndec;
 	}
@@ -1202,17 +1324,22 @@ Declaration* Parser::ParsePostfixDeclaration(void)
 				ndec->mFlags |= DTF_VOLATILE;
 				mScanner->NextToken();
 			}
+			else if (mScanner->mToken == TK_MEMMAP)
+			{
+				ndec->mFlags |= DTF_VOLATILE;
+				mScanner->NextToken();
+			}
 			else
 				break;
 		}
 
-		Declaration* dec = ParsePostfixDeclaration();
+		Declaration* dec = ParsePostfixDeclaration(autoBase);
 		ndec->mBase = dec;
 		return ndec;
 	}
 	else if (ConsumeTokenIf(TK_OPEN_PARENTHESIS))
 	{
-		Declaration* vdec = ParsePostfixDeclaration();
+		Declaration* vdec = ParsePostfixDeclaration(false);
 		if (mScanner->mToken == TK_CLOSE_PARENTHESIS)
 			mScanner->NextToken();
 		else
@@ -1250,8 +1377,15 @@ Declaration* Parser::ParsePostfixDeclaration(void)
 			if (tdec && tdec->mTemplate)
 			{
 				// for now just skip over template stuff
-				while (!ConsumeTokenIf(TK_GREATER_THAN))
-					mScanner->NextToken();
+				int depth = 0;				
+				do	{
+					if (ConsumeTokenIf(TK_GREATER_THAN))
+						depth--;
+					else if (ConsumeTokenIf(TK_LESS_THAN))
+						depth++;
+					else
+						mScanner->NextToken();
+				} while (depth);
 
 				if (mTemplateScope->mParent)
 				{
@@ -1289,6 +1423,31 @@ Declaration* Parser::ParsePostfixDeclaration(void)
 			}
 		}
 	}
+	else if (autoBase && mScanner->mToken == TK_OPEN_BRACKET)
+	{ 
+		dec = new Declaration(mScanner->mLocation, DT_VARIABLE);
+		dec->mSection = mBSSection;
+		dec->mBase = nullptr;
+
+		mScanner->NextToken();
+		Declaration* sbind = nullptr, * spp = nullptr;
+		while (mScanner->mToken == TK_IDENT)
+		{
+			Declaration* sp = new Declaration(mScanner->mLocation, DT_BINDING);
+			sp->mBase = dec;
+			sp->mIdent = mScanner->mTokenIdent;
+			if (spp)
+				spp->mNext = sp;
+			else
+				sbind = sp;
+			spp = sp;
+			mScanner->NextToken();
+			if (!ConsumeTokenIf(TK_COMMA))
+				break;
+		}
+		ConsumeToken(TK_CLOSE_BRACKET);
+		dec->mParams = sbind;
+	}
 	else
 	{
 		dec = new Declaration(mScanner->mLocation, DT_ANON);
@@ -1306,8 +1465,18 @@ Declaration* Parser::ParsePostfixDeclaration(void)
 			if (mScanner->mToken != TK_CLOSE_BRACKET)
 			{
 				Expression* exp = ParseRExpression();
-				if (exp->mType == EX_CONSTANT && exp->mDecType->IsIntegerType() && exp->mDecValue->mType == DT_CONST_INTEGER)
-					ndec->mSize = int(exp->mDecValue->mInteger);
+				if (exp->mType == EX_CONSTANT && exp->mDecType->IsIntegerType())
+				{
+					if (exp->mDecValue->mType == DT_CONST_INTEGER)
+						ndec->mSize = int(exp->mDecValue->mInteger);
+					else if (exp->mDecValue->mType == DT_CONST_TEMPLATE)
+					{
+						ndec->mSize = 0;
+						ndec->mTemplate = exp->mDecValue;
+					}
+					else
+						mErrors->Error(exp->mLocation, EERR_CONSTANT_TYPE, "Constant integer expression expected");
+				}
 				else
 					mErrors->Error(exp->mLocation, EERR_CONSTANT_TYPE, "Constant integer expression expected");
 				ndec->mFlags |= DTF_DEFINED;
@@ -1359,7 +1528,7 @@ Declaration * Parser::ParseFunctionDeclaration(Declaration* bdec)
 //			if (bdec->mType == DT_PACK_TEMPLATE)
 //				ConsumeToken(TK_ELLIPSIS);
 
-			Declaration* adec = ParsePostfixDeclaration();
+			Declaration* adec = ParsePostfixDeclaration(false);
 			adec = ReverseDeclaration(adec, bdec);
 
 			if (adec->mBase->mType == DT_TYPE_VOID)
@@ -1444,7 +1613,7 @@ Declaration * Parser::ParseFunctionDeclaration(Declaration* bdec)
 					adec->mType = DT_ARGUMENT;
 					adec->mVarIndex = vi;
 					adec->mOffset = 0;
-					if (adec->mBase->mType == DT_TYPE_ARRAY)
+					if (adec->mBase->mType == DT_TYPE_ARRAY && !adec->mBase->mTemplate)
 					{
 						Declaration* ndec = new Declaration(adec->mBase->mLocation, DT_TYPE_POINTER);
 						ndec->mBase = adec->mBase->mBase;
@@ -1722,6 +1891,58 @@ Expression* Parser::CloneVarInitExpression(Expression* vexp, Expression* iexp, E
 	}
 }
 
+Expression * Parser::CopyElision(Expression* vexp, Expression* rexp)
+{
+	if (rexp->mType == EX_CONSTRUCT && rexp->mRight->mType == EX_VARIABLE && (rexp->mRight->mDecValue->mFlags & DTF_TEMPORARY) && vexp->mType == EX_VARIABLE)
+	{
+		rexp->ReplaceVariable(rexp->mRight->mDecValue, vexp->mDecValue);
+
+		return rexp;
+	}
+	else if (rexp->mType == EX_CALL)
+	{
+		Expression* iexp = new Expression(rexp->mLocation, EX_INITIALIZATION);
+		iexp->mToken = TK_ASSIGN;
+		iexp->mLeft = vexp;
+		iexp->mRight = rexp;
+		iexp->mDecType = vexp->mDecType;
+
+		Expression* dexp = nullptr;
+		if (vexp->mDecType->mDestructor)
+		{
+			Expression* texp = new Expression(mScanner->mLocation, EX_PREFIX);
+			texp->mToken = TK_BINARY_AND;
+			texp->mLeft = vexp;
+			texp->mDecType = new Declaration(mScanner->mLocation, DT_TYPE_POINTER);
+			texp->mDecType->mFlags |= DTF_CONST | DTF_DEFINED;
+			texp->mDecType->mBase = vexp->mDecType->ToMutableType();
+			texp->mDecType->mSize = 2;
+
+			Expression* cexp = new Expression(mScanner->mLocation, EX_CONSTANT);
+			cexp->mDecValue = vexp->mDecType->mDestructor;
+			cexp->mDecType = cexp->mDecValue->mBase;
+
+			dexp = new Expression(mScanner->mLocation, EX_CALL);
+			dexp->mLeft = cexp;
+			dexp->mRight = texp;
+		}
+
+		Expression* nexp = new Expression(mScanner->mLocation, EX_CONSTRUCT);
+
+		nexp->mLeft = new Expression(mScanner->mLocation, EX_LIST);
+		nexp->mLeft->mLeft = iexp;
+		nexp->mLeft->mRight = dexp;
+
+		nexp->mRight = vexp;
+		nexp->mDecType = vexp->mDecType;
+
+		return nexp;
+	}
+
+
+	return nullptr;
+}
+
 Expression* Parser::ParseVarInitExpression(Expression* vexp, bool inner)
 {
 	Expression* exp = nullptr;
@@ -1794,7 +2015,8 @@ Expression* Parser::ParseVarInitExpression(Expression* vexp, bool inner)
 			if (!edec)
 				break;
 
-			fset += edec->mOffset;
+			if (edec->mSize)
+				fset += edec->mOffset;
 
 			Expression* qexp = new Expression(mScanner->mLocation, EX_QUALIFY);
 			qexp->mLeft = vexp;
@@ -1872,7 +2094,7 @@ Expression* Parser::ParseVarInitExpression(Expression* vexp, bool inner)
 			edec = dtype->mParams;
 			while (edec)
 			{
-				if (!fset[edec->mOffset])
+				if (edec->mSize && !fset[edec->mOffset])
 				{
 					fset += edec->mOffset;
 
@@ -1957,7 +2179,49 @@ Expression* Parser::ParseVarInitExpression(Expression* vexp, bool inner)
 			Expression* nexp = ParseVarInitExpression(qexp, true);
 			if (nexp->mType != EX_INITIALIZATION || nexp->mRight->mType != EX_CONSTANT)
 				isconst = false;
-			exp = nexp->ListAppend(exp);
+			if (nexp->mRight->mType == EX_PACK)
+			{
+				ConsumeToken(TK_ELLIPSIS);
+				Declaration* pdec = nexp->mRight->mDecValue->mParams;
+				nexp->mRight = new Expression(mScanner->mLocation, EX_VARIABLE);
+				nexp->mRight->mDecType = pdec->mBase;
+				nexp->mRight->mDecValue = pdec;
+				exp = nexp->ListAppend(exp);
+			
+				pdec = pdec->mNext;
+				while (pdec)
+				{
+					index++;
+
+					if (index > mindex)
+						mindex = index;
+					if (index < size)
+						fset += index;
+
+					Expression* qexp = new Expression(mScanner->mLocation, EX_INDEX);
+					qexp->mLeft = vexp;
+					qexp->mRight = new Expression(mScanner->mLocation, EX_CONSTANT);
+					qexp->mRight->mDecType = TheUnsignedIntTypeDeclaration;
+					qexp->mRight->mDecValue = new Declaration(mScanner->mLocation, DT_CONST_INTEGER);
+					qexp->mRight->mDecValue->mSize = 2;
+					qexp->mRight->mDecValue->mInteger = index;
+					qexp->mRight->mDecValue->mBase = TheUnsignedIntTypeDeclaration;
+					qexp->mDecType = dtype->mBase;
+
+					nexp = new Expression(mScanner->mLocation, EX_INITIALIZATION);
+					nexp->mToken = TK_ASSIGN;
+					nexp->mLeft = qexp;
+					nexp->mRight = new Expression(mScanner->mLocation, EX_VARIABLE);
+					nexp->mRight->mDecType = pdec->mBase;
+					nexp->mRight->mDecValue = pdec;
+					nexp->mDecType = dtype->mBase;
+
+					exp = nexp->ListAppend(exp);
+					pdec = pdec->mNext;
+				}
+			}
+			else
+				exp = nexp->ListAppend(exp);
 
 			index++;
 
@@ -2090,62 +2354,79 @@ Expression* Parser::ParseVarInitExpression(Expression* vexp, bool inner)
 		if (dtype->mFlags & DTF_PURE_VIRTUAL)
 			mErrors->Error(mScanner->mLocation, ERRR_INSTANTIATE_ABSTRACT_CLASS, "Cannot instantiate abstract class", dtype->mIdent);
 
-		if (fcons)
+		Declaration* mtype = dtype->ToMutableType();
+
+		Expression* rexp = ParseRExpression();
+		if (rexp->mDecType->IsSame(dtype))
 		{
-			Declaration* mtype = dtype->ToMutableType();
+			exp = CopyElision(vexp, rexp);
+			fcons = dtype->mCopyConstructor;
+		}
 
-			Expression* rexp = ParseRExpression();
-
-			Expression* cexp = new Expression(mScanner->mLocation, EX_CONSTANT);
-			cexp->mDecValue = fcons;
-			cexp->mDecType = cexp->mDecValue->mBase;
-
-			Expression* fexp = new Expression(mScanner->mLocation, EX_CALL);
-			fexp->mLeft = cexp;
-			fexp->mRight = rexp;
-
-			Expression* texp = new Expression(mScanner->mLocation, EX_PREFIX);
-			texp->mToken = TK_BINARY_AND;
-			texp->mLeft = vexp;
-			texp->mDecType = new Declaration(mScanner->mLocation, DT_TYPE_POINTER);
-			texp->mDecType->mFlags |= DTF_CONST | DTF_DEFINED;
-			texp->mDecType->mBase = mtype;
-			texp->mDecType->mSize = 2;
-
-			if (fexp->mRight)
-			{
-				Expression* lexp = new Expression(mScanner->mLocation, EX_LIST);
-				lexp->mLeft = texp;
-				lexp->mRight = fexp->mRight;
-				fexp->mRight = lexp;
-			}
-			else
-				fexp->mRight = texp;
-
-			fexp = ResolveOverloadCall(fexp);
-
-			Expression* dexp = nullptr;
-			if (dtype->mDestructor)
+		if (!exp)
+		{
+			if (fcons)
 			{
 				Expression* cexp = new Expression(mScanner->mLocation, EX_CONSTANT);
-				cexp->mDecValue = dtype->mDestructor;
+				cexp->mDecValue = fcons;
 				cexp->mDecType = cexp->mDecValue->mBase;
 
-				dexp = new Expression(mScanner->mLocation, EX_CALL);
-				dexp->mLeft = cexp;
-				dexp->mRight = texp;
+				Expression* fexp = new Expression(mScanner->mLocation, EX_CALL);
+				fexp->mLeft = cexp;
+				fexp->mRight = rexp;
+
+				Expression* texp = new Expression(mScanner->mLocation, EX_PREFIX);
+				texp->mToken = TK_BINARY_AND;
+				texp->mLeft = vexp;
+				texp->mDecType = new Declaration(mScanner->mLocation, DT_TYPE_POINTER);
+				texp->mDecType->mFlags |= DTF_CONST | DTF_DEFINED;
+				texp->mDecType->mBase = mtype;
+				texp->mDecType->mSize = 2;
+
+				if (fexp->mRight)
+				{
+					Expression* lexp = new Expression(mScanner->mLocation, EX_LIST);
+					lexp->mLeft = texp;
+					lexp->mRight = fexp->mRight;
+					fexp->mRight = lexp;
+				}
+				else
+					fexp->mRight = texp;
+
+				fexp = ResolveOverloadCall(fexp);
+
+				Expression* dexp = nullptr;
+				if (dtype->mDestructor)
+				{
+					Expression* cexp = new Expression(mScanner->mLocation, EX_CONSTANT);
+					cexp->mDecValue = dtype->mDestructor;
+					cexp->mDecType = cexp->mDecValue->mBase;
+
+					dexp = new Expression(mScanner->mLocation, EX_CALL);
+					dexp->mLeft = cexp;
+					dexp->mRight = texp;
+				}
+
+				Expression* nexp = new Expression(mScanner->mLocation, EX_CONSTRUCT);
+
+				nexp->mLeft = new Expression(mScanner->mLocation, EX_LIST);
+				nexp->mLeft->mLeft = fexp;
+				nexp->mLeft->mRight = dexp;
+
+				nexp->mRight = vexp;
+				nexp->mDecType = vexp->mDecType;
+
+				exp = nexp;
 			}
-
-			Expression* nexp = new Expression(mScanner->mLocation, EX_CONSTRUCT);
-
-			nexp->mLeft = new Expression(mScanner->mLocation, EX_LIST);
-			nexp->mLeft->mLeft = fexp;
-			nexp->mLeft->mRight = dexp;
-
-			nexp->mRight = vexp;
-			nexp->mDecType = vexp->mDecType;
-
-			exp = nexp;
+			else
+			{
+				rexp = CoerceExpression(rexp, dtype);
+				exp = new Expression(rexp->mLocation, EX_INITIALIZATION);
+				exp->mToken = TK_ASSIGN;
+				exp->mLeft = vexp;
+				exp->mRight = rexp;
+				exp->mDecType = dtype;
+			}
 		}
 	}
 	else		
@@ -2539,6 +2820,10 @@ Expression* Parser::BuildMemberInitializer(Expression* vexp)
 
 		return fexp;
 	}
+	else if (mScanner->mToken == TK_OPEN_BRACE)
+	{
+		return ParseVarInitExpression(vexp);
+	}
 	else
 	{
 		Expression* nexp = new Expression(mScanner->mLocation, EX_INITIALIZATION);
@@ -2550,6 +2835,30 @@ Expression* Parser::BuildMemberInitializer(Expression* vexp)
 		{
 			nexp->mRight = ParseRExpression();
 			ConsumeToken(TK_CLOSE_PARENTHESIS);
+		}
+		else if (nexp->mDecType->IsIntegerType())
+		{
+			nexp->mRight = new Expression(mScanner->mLocation, EX_CONSTANT);
+			nexp->mRight->mDecType = nexp->mDecType;
+			nexp->mRight->mDecValue = new Declaration(mScanner->mLocation, DT_CONST_INTEGER);
+			nexp->mRight->mDecValue->mBase = nexp->mDecType;
+			nexp->mRight->mDecValue->mSize = nexp->mDecType->mSize;
+			nexp->mRight->mDecValue->mInteger = 0;
+		}
+		else if (nexp->mDecType->mType == DT_TYPE_FLOAT)
+		{
+			nexp->mRight = new Expression(mScanner->mLocation, EX_CONSTANT);
+			nexp->mRight->mDecType = nexp->mDecType;
+			nexp->mRight->mDecValue = new Declaration(mScanner->mLocation, DT_CONST_FLOAT);
+			nexp->mRight->mDecValue->mBase = nexp->mDecType;
+			nexp->mRight->mDecValue->mSize = nexp->mDecType->mSize;
+			nexp->mRight->mDecValue->mNumber = 0;
+		}
+		else if (nexp->mDecType->mType == DT_TYPE_POINTER)
+		{
+			nexp->mRight = new Expression(mScanner->mLocation, EX_CONSTANT);
+			nexp->mRight->mDecType = nexp->mDecType;
+			nexp->mRight->mDecValue = TheNullptrConstDeclaration;
 		}
 
 		return nexp;
@@ -2921,13 +3230,18 @@ void Parser::AddDefaultConstructors(Declaration* pthis)
 	bool	inlineCopy = true;
 	bool	inlineMove = true;
 	bool	explicitDestructor = false;
-
+	bool	canMoveConstruct = true;
 
 	const Ident* dtorident = pthis->mBase->mIdent->PreMangle("~");;
 	const Ident* ctorident = pthis->mBase->mIdent->PreMangle("+");;
 	const Ident* ctorqident = pthis->mBase->mScope->Mangle(ctorident);
 	const Ident* cvtorident = pthis->mBase->mIdent->PreMangle("*");;
 	const Ident* cvtorqident = pthis->mBase->mScope->Mangle(cvtorident);
+	const Ident* cvmtorident = pthis->mBase->mIdent->PreMangle("*&");;
+
+	const Ident* asgnident = pthis->mBase->mIdent->PreMangle("=");;
+	const Ident* asgnvident = pthis->mBase->mIdent->PreMangle("=*=");;
+	const Ident* asgnvmident = pthis->mBase->mIdent->PreMangle("=*&=");;
 
 
 	// Extract constructor and destructor from scope
@@ -2963,6 +3277,8 @@ void Parser::AddDefaultConstructors(Declaration* pthis)
 
 		if (!tparam->mNext && tparam->mBase->mType == DT_TYPE_REFERENCE && pthis->mBase->IsConstSame(tparam->mBase->mBase))
 			pthis->mBase->mCopyAssignment = adec;
+		if (!tparam->mNext && tparam->mBase->mType == DT_TYPE_RVALUEREF && pthis->mBase->IsSame(tparam->mBase->mBase))
+			pthis->mBase->mMoveAssignment = adec;
 
 		adec = adec->mNext;
 	}
@@ -2992,8 +3308,11 @@ void Parser::AddDefaultConstructors(Declaration* pthis)
 		{
 			simpleMove = false;
 			if (!(bcdec->mBase->mMoveConstructor->mBase->mFlags & DTF_REQUEST_INLINE))
-				inlineCopy = false;
+				inlineMove = false;
 		}
+		else if (bcdec->mBase->mDestructor || bcdec->mBase->mDefaultConstructor || bcdec->mBase->mCopyConstructor)
+			canMoveConstruct = false;
+
 		if (bcdec->mBase->mCopyAssignment)
 			simpleAssignment = false;
 		bcdec = bcdec->mNext;
@@ -3006,6 +3325,7 @@ void Parser::AddDefaultConstructors(Declaration* pthis)
 	{
 		simpleCopy = false;
 		simpleAssignment = false;
+		canMoveConstruct = false;
 	}
 
 	Declaration* dec = pthis->mBase->mParams;
@@ -3038,10 +3358,12 @@ void Parser::AddDefaultConstructors(Declaration* pthis)
 				}
 				if (bdec->mCopyConstructor)
 					simpleCopy = false;
-				if (bdec->mCopyAssignment)
+				if (bdec->mCopyAssignment || bdec->mMoveAssignment)
 					simpleAssignment = false;
 				if (bdec->mMoveConstructor)
 					simpleMove = false;
+				else if (bdec->mDestructor || bdec->mDefaultConstructor || bdec->mCopyConstructor)
+					canMoveConstruct = false;
 			}
 			if (dec->mValue)
 				simpleConstructor = false;
@@ -3185,7 +3507,7 @@ void Parser::AddDefaultConstructors(Declaration* pthis)
 			pthisexp->mDecType = pthis;
 			pthisexp->mDecValue = cdec->mBase->mParams;
 
-			Expression* thisexp = new Expression(mScanner->mLocation, EX_PREFIX);
+			Expression* thisexp = new Expression(pthis->mLocation, EX_PREFIX);
 			thisexp->mToken = TK_MUL;
 			thisexp->mDecType = pthis->mBase;
 			thisexp->mLeft = pthisexp;
@@ -3199,6 +3521,57 @@ void Parser::AddDefaultConstructors(Declaration* pthis)
 			pthis->mBase->mCopyConstructor = AddMemberFunction(pthis->mBase, cdec);
 			if (pthis->mBase->mCopyConstructor == cdec)
 			{
+				// Copy base class
+
+				Declaration* bcdec = pthis->mBase->mBase;
+				while (bcdec)
+				{
+					if (bcdec->mBase->mCopyConstructor)
+					{
+						Declaration* mdec = bcdec->mBase->mCopyConstructor;
+
+						Expression* cexp = new Expression(pthis->mLocation, EX_CONSTANT);
+						cexp->mDecValue = mdec;
+						cexp->mDecType = cexp->mDecValue->mBase;
+
+						Expression* dexp = new Expression(pthis->mLocation, EX_CALL);
+						dexp->mLeft = cexp;
+						dexp->mRight = new Expression(mScanner->mLocation, EX_LIST);
+						dexp->mRight->mLeft = pthisexp;
+						dexp->mRight->mRight = thatexp;
+
+						Declaration* mcdec = new Declaration(mScanner->mLocation, DT_CONST_CONSTRUCTOR);
+						mcdec->mIdent = bcdec->mBase->mIdent;
+						mcdec->mValue = dexp;
+
+						cdec->mScope->Insert(bcdec->mBase->mIdent, mcdec);
+					}
+					else
+					{
+						Expression* cexp = new Expression(pthis->mLocation, EX_TYPECAST);
+						cexp->mLeft = pthisexp;
+						cexp->mDecType = bcdec->mBase->BuildPointer(pthis->mLocation);
+
+						Expression* cexp2 = new Expression(pthis->mLocation, EX_PREFIX);
+						cexp2->mToken = TK_MUL;
+						cexp2->mDecType = bcdec->mBase;
+						cexp2->mLeft = cexp;
+
+						Expression* dexp = new Expression(pthis->mLocation, EX_INITIALIZATION);
+						dexp->mToken = TK_ASSIGN;
+						dexp->mLeft = cexp2;
+						dexp->mRight = thatexp;
+						
+						Declaration* mcdec = new Declaration(mScanner->mLocation, DT_CONST_CONSTRUCTOR);
+						mcdec->mIdent = bcdec->mBase->mIdent;
+						mcdec->mValue = dexp;
+
+						cdec->mScope->Insert(bcdec->mBase->mIdent, mcdec);
+					}
+
+					bcdec = bcdec->mNext;
+				}
+
 				Declaration* dec = pthis->mBase->mParams;
 				while (dec)
 				{
@@ -3287,6 +3660,224 @@ void Parser::AddDefaultConstructors(Declaration* pthis)
 						}
 
 						Declaration* mcdec = new Declaration(mScanner->mLocation, DT_CONST_CONSTRUCTOR);
+						mcdec->mIdent = dec->mIdent;
+						mcdec->mValue = mexp;
+
+						cdec->mScope->Insert(dec->mIdent, mcdec);
+					}
+
+					dec = dec->mNext;
+				}
+			}
+
+			cdec->mFlags |= DTF_DEFINED;
+		}
+
+#if 1
+		if (!pthis->mBase->mMoveConstructor && canMoveConstruct)
+		{
+			Declaration* ctdec = new Declaration(mScanner->mLocation, DT_TYPE_FUNCTION);
+			ctdec->mSize = 0;
+			ctdec->mBase = TheVoidTypeDeclaration;
+			ctdec->mFlags |= DTF_DEFINED;
+
+			Declaration* adec = new Declaration(mScanner->mLocation, DT_ARGUMENT);
+			adec->mVarIndex = 0;
+			adec->mOffset = 0;
+			adec->mBase = new Declaration(mScanner->mLocation, DT_TYPE_RVALUEREF);
+			adec->mBase->mSize = 2;
+			adec->mBase->mBase = pthis->mBase;
+			adec->mBase->mFlags |= DTF_DEFINED;
+			adec->mSize = adec->mBase->mSize;
+			adec->mIdent = adec->mQualIdent = Ident::Unique("_");
+
+			ctdec->mParams = adec;
+
+			PrependThisArgument(ctdec, pthis);
+
+			Declaration* cdec = new Declaration(ctdec->mLocation, DT_CONST_FUNCTION);
+			cdec->mBase = ctdec;
+
+			cdec->mFlags |= cdec->mBase->mFlags & (DTF_CONST | DTF_VOLATILE);
+			if (inlineCopy)
+				cdec->mFlags |= DTF_REQUEST_INLINE;
+
+			cdec->mSection = mCodeSection;
+
+			if (mCompilerOptions & COPT_NATIVE)
+				cdec->mFlags |= DTF_NATIVE;
+
+			pthis->mBase->mMoveConstructor = cdec;
+
+			cdec->mIdent = ctorident;
+			cdec->mQualIdent = ctorqident;
+
+			cdec->mCompilerOptions = mCompilerOptions;
+			cdec->mBase->mCompilerOptions = mCompilerOptions;
+
+			cdec->mVarIndex = -1;
+
+			cdec->mValue = new Expression(mScanner->mLocation, EX_VOID);
+
+			// Now add all the moving
+
+			Expression* pthisexp = new Expression(pthis->mLocation, EX_VARIABLE);
+			pthisexp->mDecType = pthis;
+			pthisexp->mDecValue = cdec->mBase->mParams;
+
+			Expression* thisexp = new Expression(mScanner->mLocation, EX_PREFIX);
+			thisexp->mToken = TK_MUL;
+			thisexp->mDecType = pthis->mBase;
+			thisexp->mLeft = pthisexp;
+
+			Expression* thatexp = new Expression(pthis->mLocation, EX_VARIABLE);
+			thatexp->mDecType = adec->mBase;
+			thatexp->mDecValue = cdec->mBase->mParams->mNext;
+
+			cdec->mScope = new DeclarationScope(nullptr, SLEVEL_CLASS);
+
+			pthis->mBase->mMoveConstructor = AddMemberFunction(pthis->mBase, cdec);
+			if (pthis->mBase->mMoveConstructor == cdec)
+			{
+				// Move base class
+
+				Declaration* bcdec = pthis->mBase->mBase;
+				while (bcdec)
+				{
+					if (bcdec->mBase->mMoveConstructor)
+					{
+						Declaration* mdec = bcdec->mBase->mMoveConstructor;
+
+						Expression* cexp = new Expression(pthis->mLocation, EX_CONSTANT);
+						cexp->mDecValue = mdec;
+						cexp->mDecType = cexp->mDecValue->mBase;
+
+						Expression* dexp = new Expression(pthis->mLocation, EX_CALL);
+						dexp->mLeft = cexp;
+						dexp->mRight = new Expression(mScanner->mLocation, EX_LIST);
+						dexp->mRight->mLeft = pthisexp;
+						dexp->mRight->mRight = thatexp;
+
+						Declaration* mcdec = new Declaration(mScanner->mLocation, DT_CONST_CONSTRUCTOR);
+						mcdec->mIdent = bcdec->mBase->mIdent;
+						mcdec->mValue = dexp;
+
+						cdec->mScope->Insert(bcdec->mBase->mIdent, mcdec);
+					}
+					else
+					{
+						Expression* cexp = new Expression(pthis->mLocation, EX_TYPECAST);
+						cexp->mLeft = pthisexp;
+						cexp->mDecType = bcdec->mBase->BuildPointer(pthis->mLocation);
+
+						Expression* cexp2 = new Expression(pthis->mLocation, EX_PREFIX);
+						cexp2->mToken = TK_MUL;
+						cexp2->mDecType = bcdec->mBase;
+						cexp2->mLeft = cexp;
+
+						Expression* dexp = new Expression(pthis->mLocation, EX_INITIALIZATION);
+						dexp->mToken = TK_ASSIGN;
+						dexp->mLeft = cexp2;
+						dexp->mRight = thatexp;
+
+						Declaration* mcdec = new Declaration(mScanner->mLocation, DT_CONST_CONSTRUCTOR);
+						mcdec->mIdent = bcdec->mBase->mIdent;
+						mcdec->mValue = dexp;
+
+						cdec->mScope->Insert(bcdec->mBase->mIdent, mcdec);
+					}
+
+					bcdec = bcdec->mNext;
+				}
+
+				Declaration* dec = pthis->mBase->mParams;
+				while (dec)
+				{
+					if (dec->mType == DT_ELEMENT)
+					{
+						Expression* lexp = new Expression(pthis->mLocation, EX_QUALIFY);
+						lexp->mLeft = thisexp;
+						lexp->mDecValue = dec;
+						lexp->mDecType = dec->mBase;
+
+						Expression* rexp = new Expression(pthis->mLocation, EX_QUALIFY);
+						rexp->mLeft = thatexp;
+						rexp->mDecValue = dec;
+						rexp->mDecType = dec->mBase;
+
+						Expression* mexp;
+
+						Declaration* bdec = dec->mBase;
+						while (bdec->mType == DT_TYPE_ARRAY)
+							bdec = bdec->mBase;
+
+						bdec = bdec->ToMutableType();
+
+						if (bdec->mType == DT_TYPE_STRUCT && bdec->mMoveConstructor)
+						{
+							Declaration* bpdec = bdec->BuildPointer(bdec->mLocation);
+
+							if (dec->mBase->mType == DT_TYPE_STRUCT)
+							{
+								Expression* pexp = new Expression(pthis->mLocation, EX_PREFIX);
+								pexp->mLeft = lexp;
+								pexp->mToken = TK_BINARY_AND;
+								pexp->mDecType = bpdec;
+
+								Declaration* mdec = dec->mBase->mMoveConstructor;
+
+								Expression* cexp = new Expression(pthis->mLocation, EX_CONSTANT);
+								cexp->mDecValue = mdec;
+								cexp->mDecType = cexp->mDecValue->mBase;
+
+								mexp = new Expression(mScanner->mLocation, EX_CALL);
+								mexp->mLeft = cexp;
+								mexp->mRight = new Expression(mScanner->mLocation, EX_LIST);
+								mexp->mRight->mLeft = pexp;
+								mexp->mRight->mRight = rexp;
+							}
+							else
+							{
+								Expression* lpexp = new Expression(pthis->mLocation, EX_PREFIX);
+								lpexp->mLeft = lexp;
+								lpexp->mToken = TK_BINARY_AND;
+								lpexp->mDecType = bpdec;
+
+								Expression* rpexp = new Expression(pthis->mLocation, EX_PREFIX);
+								rpexp->mLeft = rexp;
+								rpexp->mToken = TK_BINARY_AND;
+								rpexp->mDecType = bpdec;
+
+								Expression* cexp = new Expression(pthis->mLocation, EX_CONSTANT);
+								cexp->mDecValue = bdec->mVectorMoveConstructor;
+								cexp->mDecType = cexp->mDecValue->mBase;
+
+								Declaration* ncdec = new Declaration(mScanner->mLocation, DT_CONST_INTEGER);
+								ncdec->mBase = TheUnsignedIntTypeDeclaration;
+								ncdec->mInteger = dec->mSize / bdec->mSize;
+
+								mexp = new Expression(mScanner->mLocation, EX_CALL);
+								mexp->mLeft = cexp;
+								mexp->mRight = new Expression(mScanner->mLocation, EX_LIST);
+								mexp->mRight->mLeft = lpexp;
+								mexp->mRight->mRight = new Expression(mScanner->mLocation, EX_LIST);
+								mexp->mRight->mRight->mLeft = rpexp;
+								mexp->mRight->mRight->mRight = new Expression(mScanner->mLocation, EX_CONSTANT);
+								mexp->mRight->mRight->mRight->mDecType = ncdec->mBase;
+								mexp->mRight->mRight->mRight->mDecValue = ncdec;
+
+							}
+						}
+						else
+						{
+							mexp = new Expression(mScanner->mLocation, EX_INITIALIZATION);
+							mexp->mToken = TK_ASSIGN;
+							mexp->mLeft = lexp;
+							mexp->mRight = rexp;
+							mexp->mDecType = lexp->mDecType;
+						}
+
+						Declaration* mcdec = new Declaration(mScanner->mLocation, DT_CONST_CONSTRUCTOR);
 						mcdec->mIdent = mScanner->mTokenIdent;
 						mcdec->mValue = mexp;
 
@@ -3299,6 +3890,7 @@ void Parser::AddDefaultConstructors(Declaration* pthis)
 
 			cdec->mFlags |= DTF_DEFINED;
 		}
+#endif
 	}
 
 	if (!simpleAssignment)
@@ -3319,7 +3911,7 @@ void Parser::AddDefaultConstructors(Declaration* pthis)
 			adec->mOffset = 0;
 			adec->mBase = new Declaration(mScanner->mLocation, DT_TYPE_REFERENCE);
 			adec->mBase->mSize = 2;
-			adec->mBase->mBase = pthis->mBase;
+			adec->mBase->mBase = pthis->mBase->ToConstType();
 			adec->mBase->mFlags |= DTF_CONST | DTF_DEFINED;
 			adec->mSize = adec->mBase->mSize;
 			adec->mIdent = adec->mQualIdent = Ident::Unique("_");
@@ -3434,6 +4026,177 @@ void Parser::AddDefaultConstructors(Declaration* pthis)
 
 									Expression* cexp = new Expression(pthis->mLocation, EX_CONSTANT);
 									cexp->mDecValue = bdec->mVectorCopyAssignment;
+									cexp->mDecType = cexp->mDecValue->mBase;
+
+									Declaration* ncdec = new Declaration(mScanner->mLocation, DT_CONST_INTEGER);
+									ncdec->mBase = TheUnsignedIntTypeDeclaration;
+									ncdec->mInteger = dec->mSize / bdec->mSize;
+
+									mexp = new Expression(mScanner->mLocation, EX_CALL);
+									mexp->mLeft = cexp;
+									mexp->mRight = new Expression(mScanner->mLocation, EX_LIST);
+									mexp->mRight->mLeft = lpexp;
+									mexp->mRight->mRight = new Expression(mScanner->mLocation, EX_LIST);
+									mexp->mRight->mRight->mLeft = rpexp;
+									mexp->mRight->mRight->mRight = new Expression(mScanner->mLocation, EX_CONSTANT);
+									mexp->mRight->mRight->mRight->mDecType = ncdec->mBase;
+									mexp->mRight->mRight->mRight->mDecValue = ncdec;
+								}
+							}
+							else
+							{
+								mexp = new Expression(mScanner->mLocation, EX_ASSIGNMENT);
+								mexp->mToken = TK_ASSIGN;
+								mexp->mLeft = lexp;
+								mexp->mRight = rexp;
+								mexp->mDecType = lexp->mDecType;
+							}
+
+							Expression* sexp = new Expression(mScanner->mLocation, EX_SEQUENCE);
+							sexp->mLeft = mexp;
+							sexp->mRight = cdec->mValue;
+							cdec->mValue = sexp;
+						}
+
+						dec = dec->mPrev;
+					}
+				}
+			}
+
+			cdec->mFlags |= DTF_DEFINED;
+		}
+
+		// Move assignment operator
+		if (!pthis->mBase->mMoveAssignment && canMoveConstruct)
+		{
+			Declaration* ctdec = new Declaration(mScanner->mLocation, DT_TYPE_FUNCTION);
+			ctdec->mSize = 0;
+			ctdec->mBase = new Declaration(mScanner->mLocation, DT_TYPE_REFERENCE);
+			ctdec->mBase->mSize = 2;
+			ctdec->mBase->mBase = pthis->mBase;
+			ctdec->mBase->mFlags |= DTF_DEFINED;
+			ctdec->mFlags |= DTF_DEFINED;
+
+			Declaration* adec = new Declaration(mScanner->mLocation, DT_ARGUMENT);
+			adec->mVarIndex = 0;
+			adec->mOffset = 0;
+			adec->mBase = new Declaration(mScanner->mLocation, DT_TYPE_RVALUEREF);
+			adec->mBase->mSize = 2;
+			adec->mBase->mBase = pthis->mBase;
+			adec->mBase->mFlags |= DTF_DEFINED;
+			adec->mSize = adec->mBase->mSize;
+			adec->mIdent = adec->mQualIdent = Ident::Unique("_");
+
+			ctdec->mParams = adec;
+
+			PrependThisArgument(ctdec, pthis);
+
+			Declaration* cdec = new Declaration(ctdec->mLocation, DT_CONST_FUNCTION);
+			cdec->mBase = ctdec;
+
+			cdec->mFlags |= cdec->mBase->mFlags & (DTF_CONST | DTF_VOLATILE);
+
+			cdec->mSection = mCodeSection;
+
+			if (mCompilerOptions & COPT_NATIVE)
+				cdec->mFlags |= DTF_NATIVE;
+
+			cdec->mIdent = Ident::Unique("operator=");
+			cdec->mQualIdent = pthis->mBase->mScope->Mangle(cdec->mIdent);
+
+			cdec->mCompilerOptions = mCompilerOptions;
+			cdec->mBase->mCompilerOptions = mCompilerOptions;
+
+			cdec->mVarIndex = -1;
+
+			if (explicitDestructor)
+				cdec->mFlags |= DTF_DEPRECATED;
+
+			Expression* pthisexp = new Expression(pthis->mLocation, EX_VARIABLE);
+			pthisexp->mDecType = pthis;
+			pthisexp->mDecValue = cdec->mBase->mParams;
+
+			Expression* thisexp = new Expression(mScanner->mLocation, EX_PREFIX);
+			thisexp->mToken = TK_MUL;
+			thisexp->mDecType = pthis->mBase->ToMutableType();
+			thisexp->mLeft = pthisexp;
+
+			cdec->mValue = new Expression(mScanner->mLocation, EX_RETURN);
+			cdec->mValue->mLeft = thisexp;
+			cdec->mValue->mDecType = cdec->mBase;
+
+			// Now add all the copying
+
+			Expression* thatexp = new Expression(pthis->mLocation, EX_VARIABLE);
+			thatexp->mDecType = adec->mBase;
+			thatexp->mDecValue = cdec->mBase->mParams->mNext;
+
+			cdec->mScope = new DeclarationScope(nullptr, SLEVEL_CLASS);
+
+			pthis->mBase->mMoveAssignment = AddMemberFunction(pthis->mBase, cdec);
+			if (pthis->mBase->mMoveAssignment == cdec)
+			{
+				Declaration* dec = pthis->mBase->mParams;
+				if (dec)
+				{
+					dec = dec->Last();
+					while (dec)
+					{
+						if (dec->mType == DT_ELEMENT)
+						{
+							Expression* lexp = new Expression(pthis->mLocation, EX_QUALIFY);
+							lexp->mLeft = thisexp;
+							lexp->mDecValue = dec;
+							lexp->mDecType = dec->mBase;
+
+							Expression* rexp = new Expression(pthis->mLocation, EX_QUALIFY);
+							rexp->mLeft = thatexp;
+							rexp->mDecValue = dec;
+							rexp->mDecType = dec->mBase;
+
+							Expression* mexp;
+
+							Declaration* bdec = dec->mBase;
+							while (bdec->mType == DT_TYPE_ARRAY)
+								bdec = bdec->mBase;
+
+							if (bdec->mType == DT_TYPE_STRUCT && bdec->mMoveAssignment)
+							{
+								Declaration* bpdec = bdec->BuildPointer(bdec->mLocation);
+
+								if (dec->mBase->mType == DT_TYPE_STRUCT)
+								{
+									Expression* pexp = new Expression(pthis->mLocation, EX_PREFIX);
+									pexp->mLeft = lexp;
+									pexp->mToken = TK_BINARY_AND;
+									pexp->mDecType = bpdec;
+
+									Declaration* mdec = bdec->mMoveAssignment;
+
+									Expression* cexp = new Expression(pthis->mLocation, EX_CONSTANT);
+									cexp->mDecValue = mdec;
+									cexp->mDecType = cexp->mDecValue->mBase;
+
+									mexp = new Expression(mScanner->mLocation, EX_CALL);
+									mexp->mLeft = cexp;
+									mexp->mRight = new Expression(mScanner->mLocation, EX_LIST);
+									mexp->mRight->mLeft = pexp;
+									mexp->mRight->mRight = rexp;
+								}
+								else
+								{
+									Expression* lpexp = new Expression(pthis->mLocation, EX_PREFIX);
+									lpexp->mLeft = lexp;
+									lpexp->mToken = TK_BINARY_AND;
+									lpexp->mDecType = bpdec;
+
+									Expression* rpexp = new Expression(pthis->mLocation, EX_PREFIX);
+									rpexp->mLeft = rexp;
+									rpexp->mToken = TK_BINARY_AND;
+									rpexp->mDecType = bpdec;
+
+									Expression* cexp = new Expression(pthis->mLocation, EX_CONSTANT);
+									cexp->mDecValue = bdec->mVectorMoveAssignment;
 									cexp->mDecType = cexp->mDecValue->mBase;
 
 									Declaration* ncdec = new Declaration(mScanner->mLocation, DT_CONST_INTEGER);
@@ -3672,7 +4435,7 @@ void Parser::AddDefaultConstructors(Declaration* pthis)
 		if (mCompilerOptions & COPT_NATIVE)
 			cdec->mFlags |= DTF_NATIVE;
 
-		cdec->mIdent = ctorident;
+		cdec->mIdent = cvtorident;
 		cdec->mQualIdent = pthis->mBase->mScope->Mangle(cdec->mIdent);
 
 		cdec->mCompilerOptions = mCompilerOptions;
@@ -3737,6 +4500,111 @@ void Parser::AddDefaultConstructors(Declaration* pthis)
 		}
 	}
 
+	if (pthis->mBase->mMoveConstructor && !pthis->mBase->mVectorMoveConstructor)
+	{
+		Declaration* ctdec = new Declaration(mScanner->mLocation, DT_TYPE_FUNCTION);
+		ctdec->mSize = 0;
+		Declaration* pdec = nullptr;
+		ctdec->mBase = TheVoidTypeDeclaration;
+		ctdec->mFlags |= DTF_DEFINED;
+
+		Declaration* sdec = new Declaration(mScanner->mLocation, DT_ARGUMENT);
+		sdec->mVarIndex = 0;
+		sdec->mOffset = 0;
+		sdec->mBase = pthis->Clone();
+		sdec->mBase->mFlags &= ~DTF_CONST;
+		sdec->mSize = sdec->mBase->mSize;
+		sdec->mIdent = sdec->mQualIdent = Ident::Unique("_");
+
+		Declaration* adec = new Declaration(mScanner->mLocation, DT_ARGUMENT);
+		adec->mVarIndex = 2;
+		adec->mOffset = 0;
+		adec->mBase = TheUnsignedIntTypeDeclaration;
+		adec->mSize = adec->mBase->mSize;
+		adec->mIdent = adec->mQualIdent = Ident::Unique("n");
+
+		sdec->mNext = adec;
+		ctdec->mParams = sdec;
+
+		Declaration* vthis = pthis->Clone();
+		vthis->mFlags &= ~DTF_CONST;
+		PrependThisArgument(ctdec, vthis);
+
+		Declaration* cdec = new Declaration(ctdec->mLocation, DT_CONST_FUNCTION);
+		cdec->mBase = ctdec;
+
+		cdec->mFlags |= cdec->mBase->mFlags & (DTF_CONST | DTF_VOLATILE);
+
+		cdec->mSection = mCodeSection;
+
+		if (mCompilerOptions & COPT_NATIVE)
+			cdec->mFlags |= DTF_NATIVE;
+
+		cdec->mIdent = cvmtorident;
+		cdec->mQualIdent = pthis->mBase->mScope->Mangle(cdec->mIdent);
+
+		cdec->mCompilerOptions = mCompilerOptions;
+		cdec->mBase->mCompilerOptions = mCompilerOptions;
+
+		cdec->mVarIndex = -1;
+
+		cdec->mFlags |= DTF_DEFINED;
+
+		pthis->mBase->mVectorMoveConstructor = AddMemberFunction(pthis->mBase, cdec);
+		if (pthis->mBase->mVectorMoveConstructor == cdec)
+		{
+			Expression* pexp = new Expression(mScanner->mLocation, EX_VARIABLE);
+			pexp->mDecType = vthis;
+			pexp->mDecValue = ctdec->mParams;
+
+			Expression* psexp = new Expression(mScanner->mLocation, EX_VARIABLE);
+			psexp->mDecType = vthis;
+			psexp->mDecValue = sdec;
+
+			Expression* aexp = new Expression(mScanner->mLocation, EX_VARIABLE);
+			aexp->mDecType = TheUnsignedIntTypeDeclaration;
+			aexp->mDecValue = adec;
+
+			Expression* iexp = new Expression(mScanner->mLocation, EX_POSTINCDEC);
+			iexp->mToken = TK_INC;
+			iexp->mLeft = pexp;
+			iexp->mDecType = pexp->mDecType;
+
+			Expression* isexp = new Expression(mScanner->mLocation, EX_POSTINCDEC);
+			isexp->mToken = TK_INC;
+			isexp->mLeft = psexp;
+			isexp->mDecType = psexp->mDecType;
+
+			Expression* disexp = new Expression(mScanner->mLocation, EX_PREFIX);
+			disexp->mToken = TK_MUL;
+			disexp->mLeft = isexp;
+			disexp->mDecType = vthis->mBase;
+
+			Expression* dexp = new Expression(mScanner->mLocation, EX_POSTINCDEC);
+			dexp->mToken = TK_DEC;
+			dexp->mLeft = aexp;
+			dexp->mDecType = aexp->mDecType;
+
+			Expression* fexp = new Expression(mScanner->mLocation, EX_CONSTANT);
+			fexp->mDecValue = pthis->mBase->mMoveConstructor;
+			fexp->mDecType = fexp->mDecValue->mBase;
+
+			Expression* cexp = new Expression(mScanner->mLocation, EX_CALL);
+			cexp->mLeft = fexp;
+			cexp->mRight = new Expression(mScanner->mLocation, EX_LIST);
+			cexp->mRight->mLeft = iexp;
+			cexp->mRight->mRight = disexp;
+
+			Expression* wexp = new Expression(mScanner->mLocation, EX_WHILE);
+			wexp->mLeft = aexp;
+			wexp->mRight = new Expression(mScanner->mLocation, EX_SEQUENCE);
+			wexp->mRight->mLeft = cexp;
+			wexp->mRight->mRight = dexp;
+
+			cdec->mValue = wexp;
+		}
+	}
+
 	if (pthis->mBase->mCopyAssignment && !pthis->mBase->mVectorCopyAssignment)
 	{
 		Declaration* ctdec = new Declaration(mScanner->mLocation, DT_TYPE_FUNCTION);
@@ -3777,8 +4645,8 @@ void Parser::AddDefaultConstructors(Declaration* pthis)
 		if (mCompilerOptions & COPT_NATIVE)
 			cdec->mFlags |= DTF_NATIVE;
 
-		cdec->mIdent = cvtorident;
-		cdec->mQualIdent = cvtorqident;
+		cdec->mIdent = asgnvident;
+		cdec->mQualIdent = pthis->mBase->mScope->Mangle(cdec->mIdent);
 
 		cdec->mCompilerOptions = mCompilerOptions;
 		cdec->mBase->mCompilerOptions = mCompilerOptions;
@@ -3824,6 +4692,111 @@ void Parser::AddDefaultConstructors(Declaration* pthis)
 
 			Expression* fexp = new Expression(mScanner->mLocation, EX_CONSTANT);
 			fexp->mDecValue = pthis->mBase->mCopyAssignment;
+			fexp->mDecType = fexp->mDecValue->mBase;
+
+			Expression* cexp = new Expression(mScanner->mLocation, EX_CALL);
+			cexp->mLeft = fexp;
+			cexp->mRight = new Expression(mScanner->mLocation, EX_LIST);
+			cexp->mRight->mLeft = iexp;
+			cexp->mRight->mRight = disexp;
+
+			Expression* wexp = new Expression(mScanner->mLocation, EX_WHILE);
+			wexp->mLeft = aexp;
+			wexp->mRight = new Expression(mScanner->mLocation, EX_SEQUENCE);
+			wexp->mRight->mLeft = cexp;
+			wexp->mRight->mRight = dexp;
+
+			cdec->mValue = wexp;
+		}
+	}
+
+	if (pthis->mBase->mMoveAssignment && !pthis->mBase->mVectorMoveAssignment)
+	{
+		Declaration* ctdec = new Declaration(mScanner->mLocation, DT_TYPE_FUNCTION);
+		ctdec->mSize = 0;
+		Declaration* pdec = nullptr;
+		ctdec->mBase = TheVoidTypeDeclaration;
+		ctdec->mFlags |= DTF_DEFINED;
+
+		Declaration* sdec = new Declaration(mScanner->mLocation, DT_ARGUMENT);
+		sdec->mVarIndex = 0;
+		sdec->mOffset = 0;
+		sdec->mBase = pthis->Clone();
+		sdec->mBase->mFlags &= ~DTF_CONST;
+		sdec->mSize = sdec->mBase->mSize;
+		sdec->mIdent = sdec->mQualIdent = Ident::Unique("_");
+
+		Declaration* adec = new Declaration(mScanner->mLocation, DT_ARGUMENT);
+		adec->mVarIndex = 2;
+		adec->mOffset = 0;
+		adec->mBase = TheUnsignedIntTypeDeclaration;
+		adec->mSize = adec->mBase->mSize;
+		adec->mIdent = adec->mQualIdent = Ident::Unique("n");
+
+		sdec->mNext = adec;
+		ctdec->mParams = sdec;
+
+		Declaration* vthis = pthis->Clone();
+		vthis->mFlags &= ~DTF_CONST;
+		PrependThisArgument(ctdec, vthis);
+
+		Declaration* cdec = new Declaration(ctdec->mLocation, DT_CONST_FUNCTION);
+		cdec->mBase = ctdec;
+
+		cdec->mFlags |= cdec->mBase->mFlags & (DTF_CONST | DTF_VOLATILE);
+
+		cdec->mSection = mCodeSection;
+
+		if (mCompilerOptions & COPT_NATIVE)
+			cdec->mFlags |= DTF_NATIVE;
+
+		cdec->mIdent = asgnvmident;
+		cdec->mQualIdent = pthis->mBase->mScope->Mangle(cdec->mIdent);
+
+		cdec->mCompilerOptions = mCompilerOptions;
+		cdec->mBase->mCompilerOptions = mCompilerOptions;
+
+		cdec->mVarIndex = -1;
+
+		cdec->mFlags |= DTF_DEFINED;
+
+		pthis->mBase->mVectorMoveAssignment = AddMemberFunction(pthis->mBase, cdec);
+		if (pthis->mBase->mVectorMoveAssignment == cdec)
+		{
+			Expression* pexp = new Expression(mScanner->mLocation, EX_VARIABLE);
+			pexp->mDecType = vthis;
+			pexp->mDecValue = ctdec->mParams;
+
+			Expression* psexp = new Expression(mScanner->mLocation, EX_VARIABLE);
+			psexp->mDecType = vthis;
+			psexp->mDecValue = sdec;
+
+			Expression* aexp = new Expression(mScanner->mLocation, EX_VARIABLE);
+			aexp->mDecType = TheUnsignedIntTypeDeclaration;
+			aexp->mDecValue = adec;
+
+			Expression* iexp = new Expression(mScanner->mLocation, EX_POSTINCDEC);
+			iexp->mToken = TK_INC;
+			iexp->mLeft = pexp;
+			iexp->mDecType = pexp->mDecType;
+
+			Expression* isexp = new Expression(mScanner->mLocation, EX_POSTINCDEC);
+			isexp->mToken = TK_INC;
+			isexp->mLeft = psexp;
+			isexp->mDecType = psexp->mDecType;
+
+			Expression* disexp = new Expression(mScanner->mLocation, EX_PREFIX);
+			disexp->mToken = TK_MUL;
+			disexp->mLeft = isexp;
+			disexp->mDecType = vthis->mBase;
+
+			Expression* dexp = new Expression(mScanner->mLocation, EX_POSTINCDEC);
+			dexp->mToken = TK_DEC;
+			dexp->mLeft = aexp;
+			dexp->mDecValue = aexp->mDecType;
+
+			Expression* fexp = new Expression(mScanner->mLocation, EX_CONSTANT);
+			fexp->mDecValue = pthis->mBase->mMoveAssignment;
 			fexp->mDecType = fexp->mDecValue->mBase;
 
 			Expression* cexp = new Expression(mScanner->mLocation, EX_CALL);
@@ -4232,22 +5205,57 @@ Expression* Parser::AddFunctionCallRefReturned(Expression* exp)
 
 				rexp = ConcatExpression(rexp, AddFunctionCallRefReturned(pex));
 
-				if ((pdec->mBase->mType == DT_TYPE_REFERENCE || pdec->mBase->mType == DT_TYPE_RVALUEREF) && 
+				if (pdec->mBase->IsComplexStruct() && pex->mType == EX_CALL && pex->mDecType->mType == DT_TYPE_STRUCT)
+				{
+					Declaration* vdec = AllocTempVar(pex->mDecType);
+
+					Expression* vexp = new Expression(pex->mLocation, EX_VARIABLE);
+					vexp->mDecType = pex->mDecType;
+					vexp->mDecValue = vdec;
+
+					Expression* cexp = new Expression(pex->mLocation, pex->mType);
+					cexp->mDecType = pex->mDecType;
+					cexp->mDecValue = pex->mDecValue;
+					cexp->mLeft = pex->mLeft;
+					cexp->mRight = pex->mRight;
+					cexp->mToken = pex->mToken;
+
+					pex->mType = EX_INITIALIZATION;
+					pex->mToken = TK_ASSIGN;
+					pex->mLeft = vexp;
+					pex->mRight = cexp;
+					pex->mDecValue = nullptr;
+					pex->mDecType = vdec->mBase;
+
+					if (vdec->mBase->mDestructor)
+					{
+						Expression* texp = new Expression(mScanner->mLocation, EX_PREFIX);
+						texp->mToken = TK_BINARY_AND;
+						texp->mLeft = vexp;
+						texp->mDecType = new Declaration(mScanner->mLocation, DT_TYPE_POINTER);
+						texp->mDecType->mFlags |= DTF_CONST | DTF_DEFINED;
+						texp->mDecType->mBase = vdec->mBase;
+						texp->mDecType->mSize = 2;
+
+						Expression* cexp = new Expression(mScanner->mLocation, EX_CONSTANT);
+						cexp->mDecValue = vdec->mBase->mDestructor;
+						cexp->mDecType = cexp->mDecValue->mBase;
+
+						Expression* dexp = new Expression(mScanner->mLocation, EX_CALL);
+						dexp->mLeft = cexp;
+						dexp->mRight = texp;
+
+						rexp = ConcatExpression(rexp, dexp);
+					}
+				}
+				else if ((pdec->mBase->mType == DT_TYPE_REFERENCE || pdec->mBase->mType == DT_TYPE_RVALUEREF) && 
 					(pex->mDecType->mType != DT_TYPE_REFERENCE && pex->mDecType->mType != DT_TYPE_RVALUEREF) && pex->mType == EX_CALL)
 				{
 					// Returning a value object for pass as reference
 					// add a temporary variable
 
 					Declaration* vdec = AllocTempVar(pex->mDecType);
-#if 0
-					int	nindex = mLocalIndex++;
 
-					Declaration* vdec = new Declaration(exp->mLocation, DT_VARIABLE);
-
-					vdec->mVarIndex = nindex;
-					vdec->mBase = pex->mDecType;
-					vdec->mSize = pex->mDecType->mSize;
-#endif
 					Expression* vexp = new Expression(pex->mLocation, EX_VARIABLE);
 					vexp->mDecType = pex->mDecType;
 					vexp->mDecValue = vdec;
@@ -4355,7 +5363,16 @@ Expression* Parser::AddFunctionCallRefReturned(Expression* exp)
 				{
 					pex->mLeft->mRight = nullptr;
 				}
-
+#if 1
+				else if (pex->mType == EX_PREFIX && pex->mToken == TK_BINARY_AND && pex->mLeft->mType == EX_CONSTRUCT)
+				{
+					if (pex->mLeft->mRight && pex->mLeft->mRight->mType == EX_VARIABLE && (pex->mLeft->mRight->mDecValue->mFlags & DTF_TEMPORARY))
+					{
+						rexp = ConcatExpression(rexp, pex->mLeft->mLeft->mRight);
+						pex->mLeft->mLeft->mRight = nullptr;
+					}
+				}
+#endif
 				pdec = pdec->mNext;
 			}
 		}
@@ -4526,6 +5543,12 @@ void Parser::ParseVariableInit(Declaration* ndec, Expression* pexp)
 	if (ndec->mBase->mFlags & DTF_PURE_VIRTUAL)
 		mErrors->Error(ndec->mLocation, ERRR_INSTANTIATE_ABSTRACT_CLASS, "Cannot instantiate abstract class", ndec->mIdent);
 
+	if (pexp && pexp->mType != EX_LIST)
+	{
+		if (pexp->mDecType->IsSame(ndec->mBase))
+			fcons = ndec->mBase->mCopyConstructor;
+	}
+
 	if (fcons)
 	{
 		Declaration* mtype = ndec->mBase->ToMutableType();
@@ -4562,6 +5585,9 @@ void Parser::ParseVariableInit(Declaration* ndec, Expression* pexp)
 
 		fexp = ResolveOverloadCall(fexp);
 
+		if ((fexp->mLeft->mDecValue->mFlags & DTF_CONSTEXPR) && ndec->mSection == mBSSection)
+			ndec->mSection = mDataSection;
+
 		Expression* dexp = nullptr;
 		if (ndec->mBase->mDestructor)
 		{
@@ -4585,14 +5611,92 @@ void Parser::ParseVariableInit(Declaration* ndec, Expression* pexp)
 
 		ndec->mValue = nexp;
 	}
-	else if (pexp && pexp->mType != EX_LIST && ndec->mBase->CanAssign(pexp->mDecType))
+	else if (pexp && pexp->mType != EX_LIST)
 	{
-		ndec->mValue = pexp;
+		ndec->mBase = ndec->mBase->DeduceAutoInit(pexp->mDecType);
+		if (ndec->mBase->CanAssign(pexp->mDecType))
+			ndec->mValue = pexp;
+		else
+			mErrors->Error(pexp->mLocation, EERR_INCOMPATIBLE_TYPES, "Can not initialize variable with expression", ndec->mIdent);
 	}
 	else if (pexp)
 		mErrors->Error(pexp->mLocation, EERR_INCOMPATIBLE_TYPES, "Can not initialize variable with expression", ndec->mIdent);
 	else
 		mErrors->Error(mScanner->mLocation, EERR_INCOMPATIBLE_TYPES, "Can not initialize variable with expression", ndec->mIdent);
+}
+
+void Parser::ExpandStructuredBinding(Declaration* dec)
+{
+	if (dec->mParams && dec->mParams->mType == DT_BINDING)
+	{
+		Declaration* pdec = dec->mBase->NonRefBase();
+		if (pdec->mType != DT_TYPE_AUTO)
+		{
+			Expression* vex = new Expression(dec->mLocation, EX_VARIABLE);
+			vex->mDecType = dec->mBase;
+			vex->mDecValue = dec;
+
+			Declaration* bdec = dec->mParams;
+			if (pdec->mType == DT_TYPE_STRUCT)
+			{
+				Declaration* sdec = pdec->mParams;
+				while (bdec)
+				{
+					if (sdec)
+					{
+						if (sdec->mType == DT_ELEMENT)
+						{
+							Expression* ex = new Expression(bdec->mLocation, EX_QUALIFY);
+							ex->mLeft = vex;
+							ex->mDecType = sdec->mBase;
+							ex->mDecValue = sdec;
+							bdec->mValue = ex;
+
+							if (mScope->Insert(bdec->mIdent, bdec))
+								mErrors->Error(dec->mLocation, ERRR_INVALID_STRUCT_BINDING_TYPE, "Duplicate struct binding identifier");
+
+							bdec = bdec->mNext;
+						}
+
+						sdec = sdec->mNext;
+					}
+					else
+					{
+						mErrors->Error(dec->mLocation, ERRR_INVALID_STRUCT_BINDING_TYPE, "Too many elements in structured binding");
+						break;
+					}
+				}
+			}
+			else if (pdec->mType == DT_TYPE_ARRAY)
+			{
+				int	index = 0;
+				while (bdec)
+				{
+					if (index * pdec->mBase->mSize > pdec->mSize)
+						mErrors->Error(dec->mLocation, ERRR_INVALID_STRUCT_BINDING_TYPE, "Too many elements in structured binding");
+
+					Expression* ex = new Expression(bdec->mLocation, EX_INDEX);
+					ex->mLeft = vex;
+					ex->mRight = new Expression(bdec->mLocation, EX_CONSTANT);
+					ex->mRight->mDecType = TheSignedIntTypeDeclaration;
+					ex->mRight->mDecValue = new Declaration(bdec->mLocation, DT_CONST_INTEGER);
+					ex->mRight->mDecValue->mBase = TheSignedIntTypeDeclaration;
+					ex->mRight->mDecValue->mSize = 2;
+					ex->mRight->mDecValue->mInteger = index;
+					ex->mDecType = pdec->mBase;
+					bdec->mValue = ex;
+					index++;
+
+					if (mScope->Insert(bdec->mIdent, bdec))
+						mErrors->Error(dec->mLocation, ERRR_INVALID_STRUCT_BINDING_TYPE, "Duplicate struct binding identifier");
+
+					bdec = bdec->mNext;
+				}
+			}
+			else
+				mErrors->Error(dec->mLocation, ERRR_INVALID_STRUCT_BINDING_TYPE, "Invalid structured binding type");
+		}
+	}
 }
 
 Declaration* Parser::ParseDeclaration(Declaration * pdec, bool variable, bool expression, bool member, Declaration* pthis, Declaration* ptempl)
@@ -4657,6 +5761,23 @@ Declaration* Parser::ParseDeclaration(Declaration * pdec, bool variable, bool ex
 				Declaration* dec;
 
 				do {
+					if (mScanner->mToken == TK_IDENT && !mScope->Lookup(mScanner->mTokenIdent, SLEVEL_SCOPE))
+					{
+						const Ident* ident = mScanner->mTokenIdent;
+						mScanner->NextToken();
+						if (ConsumeTokenIf(TK_ASSIGN))
+						{
+							Expression	* texp = ParseSimpleExpression(false, true);
+							if (texp && texp->mType == EX_TYPE)
+							{
+								mScope->Insert(ident, texp->mDecType);
+								dec = texp->mDecType;
+								continue;
+							}
+						}
+						else
+							mScanner->UngetToken(TK_IDENT, ident);
+					}
 					dec = ParseQualIdent(false);
 					if (dec)
 					{
@@ -5144,7 +6265,7 @@ Declaration* Parser::ParseDeclaration(Declaration * pdec, bool variable, bool ex
 
 	for (;;)
 	{
-		Declaration* ndec = ParsePostfixDeclaration();
+		Declaration* ndec = ParsePostfixDeclaration(bdec->IsAuto());
 
 		ndec = ReverseDeclaration(ndec, bdec);
 
@@ -5157,7 +6278,7 @@ Declaration* Parser::ParseDeclaration(Declaration * pdec, bool variable, bool ex
 			npdec = npdec->mBase;
 
 		// Make room for return value pointer on struct return
-		if (npdec->mBase->mType == DT_TYPE_FUNCTION && npdec->mBase->mBase->mType == DT_TYPE_STRUCT)
+		if (npdec->mBase->mType == DT_TYPE_FUNCTION && npdec->mBase->mBase->IsComplexStruct())
 		{
 			Declaration* pdec = npdec->mBase->mParams;
 			while (pdec)
@@ -5210,6 +6331,9 @@ Declaration* Parser::ParseDeclaration(Declaration * pdec, bool variable, bool ex
 
 			if (variable)
 			{
+				if (storageFlags & DTF_CONSTEXPR)
+					ndec->mBase = ndec->mBase->ToConstType();
+
 				ndec->mFlags |= storageFlags;
 				ndec->mFlags |= ndec->mBase->mFlags & (DTF_CONST | DTF_VOLATILE);
 
@@ -5355,6 +6479,8 @@ Declaration* Parser::ParseDeclaration(Declaration * pdec, bool variable, bool ex
 											ppdec->mIdent = npdec->mIdent;
 											ppdec->mQualIdent = npdec->mQualIdent;
 										}
+										ppdec->mBase = npdec->mBase;
+
 										npdec = npdec->mNext;
 										ppdec = ppdec->mNext;
 									}
@@ -5462,10 +6588,16 @@ Declaration* Parser::ParseDeclaration(Declaration * pdec, bool variable, bool ex
 				}
 				else
 					ndec->mVarIndex = mLocalIndex++;
+
 			}
 			else if (pthis)
 			{
 				ndec->mFlags |= storageFlags & (DTF_STATIC | DTF_PREVENT_INLINE | DTF_FORCE_INLINE);
+				if (storageFlags & DTF_CONSTEXPR)
+				{
+					ndec->mFlags |= DTF_CONSTEXPR;
+					ndec->mBase = ndec->mBase->ToConstType();
+				}
 			}
 
 			ndec->mOffset = 0;
@@ -5523,9 +6655,21 @@ Declaration* Parser::ParseDeclaration(Declaration * pdec, bool variable, bool ex
 							vexp->mDecValue = ndec;
 
 							ndec->mValue = ParseVarInitExpression(vexp);
+
+							if (ndec->mBase->mType == DT_TYPE_AUTO)
+							{
+								ndec->mBase = ndec->mBase->DeduceAutoInit(ndec->mValue->mDecType);
+								if (ndec->mValue->mDecType->IsSame(ndec->mBase))
+								{
+									vexp->mDecType = ndec->mBase;
+									Expression* exp = CopyElision(vexp, ndec->mValue);
+									if (exp)
+										ndec->mValue = exp;
+								}
+							}
 						}
 
-						ndec->mBase = ndec->mBase->DeduceAuto(ndec->mValue->mDecType);
+						ndec->mBase = ndec->mBase->DeduceAutoInit(ndec->mValue->mDecType);
 
 						if (ndec->mFlags & (DTF_GLOBAL | DTF_STATIC))
 						{
@@ -5746,6 +6890,8 @@ Declaration* Parser::ParseDeclaration(Declaration * pdec, bool variable, bool ex
 				}
 			}
 
+			ExpandStructuredBinding(ndec);
+
 			if (storageFlags & DTF_EXPORT)
 			{
 				mCompilationUnits->AddReferenced(ndec);
@@ -5935,13 +7081,33 @@ Expression* Parser::ParseDeclarationExpression(Declaration * pdec)
 Declaration* Parser::ParseQualIdent(bool lhs)
 {
 	Declaration* dec = nullptr;
-	if (mTemplateScope)
-	{
-		dec = mTemplateScope->Lookup(mScanner->mTokenIdent);
-	}
 
-	if (!dec)
-		dec = mScope->Lookup(mScanner->mTokenIdent);
+	if (mScanner->mToken == TK_COLCOLON)
+	{
+		mScanner->NextToken();
+		if (mScanner->mToken == TK_IDENT)
+		{
+			DeclarationScope* scope = mScope;
+			while (scope->mLevel > SLEVEL_STATIC)
+				scope = scope->mParent;
+			dec = scope->Lookup(mScanner->mTokenIdent);
+		}
+		else
+		{
+			mErrors->Error(mScanner->mLocation, EERR_SYNTAX, "Identifier expected");
+			return nullptr;
+		}
+	}
+	else
+	{
+		if (mTemplateScope)
+		{
+			dec = mTemplateScope->Lookup(mScanner->mTokenIdent);
+		}
+
+		if (!dec)
+			dec = mScope->Lookup(mScanner->mTokenIdent);
+	}
 
 	if (dec)
 	{
@@ -6370,6 +7536,127 @@ Expression* Parser::ParseCastExpression(Expression* exp)
 	return exp;
 }
 
+Expression* Parser::ParseIdentExpression(const Location & eloc, Declaration* dec, bool lhs, bool tid)
+{
+	Expression* exp = nullptr;
+
+	if (dec->mTemplate && mScanner->mToken == TK_LESS_THAN)
+	{
+		dec = ParseTemplateExpansion(dec->mTemplate, nullptr);
+		while (ConsumeTokenIf(TK_COLCOLON))
+		{
+			if (mScanner->mToken == TK_IDENT)
+			{
+				if (dec->mType == DT_NAMESPACE || dec->mType == DT_TYPE_STRUCT || dec->mType == DT_TYPE_ENUM)
+				{
+					Declaration* ndec = dec->mScope->Lookup(mScanner->mTokenIdent, SLEVEL_USING);
+
+					if (ndec)
+						dec = ndec;
+					else
+						mErrors->Error(mScanner->mLocation, EERR_OBJECT_NOT_FOUND, "Unknown identifier", mScanner->mTokenIdent);
+				}
+				else
+					mErrors->Error(mScanner->mLocation, EERR_INCOMPATIBLE_OPERATOR, "Not a class or namespace");
+
+			}
+			else
+				mErrors->Error(mScanner->mLocation, EERR_SYNTAX, "Identifier expected");
+
+			mScanner->NextToken();
+		}
+	}
+
+	if (dec->mType == DT_CONST_INTEGER || dec->mType == DT_CONST_FLOAT || dec->mType == DT_CONST_FUNCTION || dec->mType == DT_CONST_ASSEMBLER || dec->mType == DT_LABEL || dec->mType == DT_LABEL_REF)
+	{
+		exp = new Expression(eloc, EX_CONSTANT);
+		exp->mDecValue = dec;
+		exp->mDecType = dec->mBase;
+		exp->mConst = true;
+	}
+	else if (dec->mType == DT_VARIABLE || dec->mType == DT_ARGUMENT)
+	{
+		if (/*(dec->mFlags & DTF_STATIC) &&*/ (dec->mFlags & DTF_CONST) && dec->mValue)
+		{
+			if (dec->mBase->IsNumericType())
+			{
+				if (dec->mValue->mType == EX_CONSTANT)
+				{
+					exp = dec->mValue;
+				}
+			}
+			else if (dec->mBase->mType == DT_TYPE_POINTER)
+			{
+				if (dec->mValue->mType == EX_CONSTANT)
+				{
+					if (dec->mValue->mDecValue->mType == DT_CONST_ADDRESS || dec->mValue->mDecValue->mType == DT_CONST_POINTER)
+						exp = dec->mValue;
+				}
+			}
+		}
+
+		if (!exp)
+		{
+			exp = new Expression(eloc, EX_VARIABLE);
+			exp->mDecValue = dec;
+			exp->mDecType = dec->mBase;
+		}
+	}
+	else if (dec->mType == DT_BINDING)
+	{
+		return dec->mValue;
+	}
+	else if (dec->mType == DT_PACK_ARGUMENT)
+	{
+		exp = new Expression(mScanner->mLocation, EX_PACK);
+		exp->mDecValue = dec;
+		exp->mDecType = dec->mBase;
+	}
+	else if (dec->mType == DT_PACK_TYPE)
+	{
+		exp = new Expression(mScanner->mLocation, EX_PACK_TYPE);
+		exp->mDecValue = nullptr;
+		exp->mDecType = dec;
+	}
+	else if (dec->mType <= DT_TYPE_FUNCTION)
+	{
+		if (lhs)
+			exp = ParseDeclarationExpression(dec);
+		else
+		{
+			exp = new Expression(mScanner->mLocation, EX_TYPE);
+			exp->mDecValue = nullptr;
+			exp->mDecType = ParseTypeID(tid, dec);
+		}
+	}
+	else if (dec->mType == DT_CONST_TEMPLATE)
+	{
+		exp = new Expression(mScanner->mLocation, EX_CONSTANT);
+		exp->mDecValue = dec;
+		exp->mDecType = TheSignedIntTypeDeclaration;
+	}
+	else if (dec->mType == DT_PACK_TEMPLATE)
+	{
+		exp = new Expression(mScanner->mLocation, EX_PACK_TYPE);
+		exp->mDecType = dec;
+	}
+	else if (dec->mType == DT_ELEMENT)
+	{
+		mErrors->Error(mScanner->mLocation, EERR_NON_STATIC_MEMBER, "Non static member access", mScanner->mTokenIdent);
+	}
+	else if (dec->mType == DT_CLABEL)
+	{
+		exp = new Expression(dec->mLocation, EX_LABEL);
+		exp->mDecValue = dec;
+	}
+	else
+	{
+		mErrors->Error(mScanner->mLocation, EERR_INVALID_IDENTIFIER, "Invalid identifier", mScanner->mTokenIdent);
+	}
+
+	return exp;
+}
+
 Expression* Parser::ParseSimpleExpression(bool lhs, bool tid)
 {
 	Declaration* dec = nullptr;
@@ -6408,6 +7695,8 @@ Expression* Parser::ParseSimpleExpression(bool lhs, bool tid)
 	case TK_AUTO:
 	case TK_STRIPED:
 	case TK_DECLTYPE:
+	case TK_MEMMAP:
+	case TK_TYPENAME:
 		exp = ParseDeclarationExpression(nullptr);
 		break;
 
@@ -6596,6 +7885,12 @@ Expression* Parser::ParseSimpleExpression(bool lhs, bool tid)
 
 		mScanner->NextToken();
 		break;
+	case TK_COLCOLON:
+		dec = ParseQualIdent(lhs);
+		if (dec)
+			exp = ParseIdentExpression(eloc, dec, lhs);
+		break;
+
 	case TK_IDENT:
 		if (mLambda && mCaptureToken != TK_NONE && !mScope->Lookup(mScanner->mTokenIdent, SLEVEL_CLASS) && !mLambda->mScope->Lookup(mScanner->mTokenIdent, SLEVEL_CLASS))
 		{
@@ -6670,117 +7965,7 @@ Expression* Parser::ParseSimpleExpression(bool lhs, bool tid)
 			if (!dec)
 				dec = ParseQualIdent(lhs);
 			if (dec)
-			{
-				if (dec->mTemplate && mScanner->mToken == TK_LESS_THAN)
-				{
-					dec = ParseTemplateExpansion(dec->mTemplate, nullptr);
-					while (ConsumeTokenIf(TK_COLCOLON))
-					{
-						if (mScanner->mToken == TK_IDENT)
-						{
-							if (dec->mType == DT_NAMESPACE || dec->mType == DT_TYPE_STRUCT || dec->mType == DT_TYPE_ENUM)
-							{
-								Declaration* ndec = dec->mScope->Lookup(mScanner->mTokenIdent, SLEVEL_USING);
-
-								if (ndec)
-									dec = ndec;
-								else
-									mErrors->Error(mScanner->mLocation, EERR_OBJECT_NOT_FOUND, "Unknown identifier", mScanner->mTokenIdent);
-							}
-							else
-								mErrors->Error(mScanner->mLocation, EERR_INCOMPATIBLE_OPERATOR, "Not a class or namespace");
-
-						}
-						else
-							mErrors->Error(mScanner->mLocation, EERR_SYNTAX, "Identifier expected");
-
-						mScanner->NextToken();
-					}
-				}
-
-				if (dec->mType == DT_CONST_INTEGER || dec->mType == DT_CONST_FLOAT || dec->mType == DT_CONST_FUNCTION || dec->mType == DT_CONST_ASSEMBLER || dec->mType == DT_LABEL || dec->mType == DT_LABEL_REF)
-				{
-					exp = new Expression(eloc, EX_CONSTANT);
-					exp->mDecValue = dec;
-					exp->mDecType = dec->mBase;
-					exp->mConst = true;
-				}
-				else if (dec->mType == DT_VARIABLE || dec->mType == DT_ARGUMENT)
-				{
-					if (/*(dec->mFlags & DTF_STATIC) &&*/ (dec->mFlags & DTF_CONST) && dec->mValue)
-					{
-						if (dec->mBase->IsNumericType())
-						{
-							if (dec->mValue->mType == EX_CONSTANT)
-							{
-								exp = dec->mValue;
-							}
-						}
-						else if (dec->mBase->mType == DT_TYPE_POINTER)
-						{
-							if (dec->mValue->mType == EX_CONSTANT)
-							{
-								if (dec->mValue->mDecValue->mType == DT_CONST_ADDRESS || dec->mValue->mDecValue->mType == DT_CONST_POINTER)
-									exp = dec->mValue;
-							}
-						}
-					}
-
-					if (!exp)
-					{
-						exp = new Expression(eloc, EX_VARIABLE);
-						exp->mDecValue = dec;
-						exp->mDecType = dec->mBase;
-					}
-				}
-				else if (dec->mType == DT_PACK_ARGUMENT)
-				{
-					exp = new Expression(mScanner->mLocation, EX_PACK);
-					exp->mDecValue = dec;
-					exp->mDecType = dec->mBase;
-				}
-				else if (dec->mType == DT_PACK_TYPE)
-				{
-					exp = new Expression(mScanner->mLocation, EX_PACK_TYPE);
-					exp->mDecValue = nullptr;
-					exp->mDecType = dec;
-				}
-				else if (dec->mType <= DT_TYPE_FUNCTION)
-				{
-					if (lhs)
-						exp = ParseDeclarationExpression(dec);
-					else
-					{
-						exp = new Expression(mScanner->mLocation, EX_TYPE);
-						exp->mDecValue = nullptr;
-						exp->mDecType = ParseTypeID(tid, dec);
-					}
-				}
-				else if (dec->mType == DT_CONST_TEMPLATE)
-				{
-					exp = new Expression(mScanner->mLocation, EX_CONSTANT);
-					exp->mDecValue = dec;
-					exp->mDecType = TheSignedIntTypeDeclaration;
-				}
-				else if (dec->mType == DT_PACK_TEMPLATE)
-				{
-					exp = new Expression(mScanner->mLocation, EX_PACK_TYPE);
-					exp->mDecType = dec;
-				}
-				else if (dec->mType == DT_ELEMENT)
-				{
-					mErrors->Error(mScanner->mLocation, EERR_NON_STATIC_MEMBER, "Non static member access", mScanner->mTokenIdent);
-				}
-				else if (dec->mType == DT_CLABEL)
-				{
-					exp = new Expression(dec->mLocation, EX_LABEL);
-					exp->mDecValue = dec;
-				}
-				else
-				{
-					mErrors->Error(mScanner->mLocation, EERR_INVALID_IDENTIFIER, "Invalid identifier", mScanner->mTokenIdent);
-				}
-			}
+				exp = ParseIdentExpression(eloc, dec, lhs, tid);
 		}
 
 		break;
@@ -6839,6 +8024,8 @@ Expression* Parser::ParseSimpleExpression(bool lhs, bool tid)
 		exp = ParseListExpression(true);
 		ConsumeToken(TK_CLOSE_PARENTHESIS);
 
+		if (exp->mType == EX_LIST)
+			exp->mType = EX_COMMA;
 		exp = ParseCastExpression(exp);
 		break;
 	case TK_OPEN_BRACKET:
@@ -6866,11 +8053,18 @@ Expression* Parser::ParseSimpleExpression(bool lhs, bool tid)
 		}
 		break;
 	case TK_ASM:
+	{
+
 		mScanner->NextToken();
+
+		uint64	aflags = ParseAssemblerFlags();
+
 		if (mScanner->mToken == TK_OPEN_BRACE)
 		{
 			mScanner->NextToken();
 			exp = ParseAssembler();
+			exp->mDecValue->mFlags |= aflags;
+
 			exp->mDecType = TheSignedLongTypeDeclaration;
 			if (mScanner->mToken == TK_CLOSE_BRACE)
 				mScanner->NextToken();
@@ -6882,7 +8076,7 @@ Expression* Parser::ParseSimpleExpression(bool lhs, bool tid)
 			mErrors->Error(mScanner->mLocation, EERR_SYNTAX, "'{' expected");
 			exp = new Expression(mScanner->mLocation, EX_VOID);
 		}
-		break;
+	}	break;
 	default:
 		mErrors->Error(mScanner->mLocation, EERR_SYNTAX, "Term starts with invalid token", TokenNames[mScanner->mToken]);
 		mScanner->NextToken();
@@ -6902,7 +8096,7 @@ Declaration* Parser::MemberLookup(Declaration* dtype, const Ident* ident, int & 
 	if ((mCompilerOptions & COPT_CPLUSPLUS) && ident == dtype->mIdent)
 		return nullptr;
 
-	Declaration* mdec = dtype->mScope->Lookup(ident, SLEVEL_CLASS);
+	Declaration* mdec = dtype->mScope ? dtype->mScope->Lookup(ident, SLEVEL_CLASS) : nullptr;
 	offset = 0;
 	flags = 0;
 
@@ -6936,6 +8130,50 @@ Declaration* Parser::MemberLookup(Declaration* dtype, const Ident* ident, int & 
 	return mdec;
 }
 
+uint64 Parser::ParseAssemblerFlags(void)
+{
+	uint64	flags = 0;
+
+	if (ConsumeTokenIf(TK_VOLATILE))
+		flags |= DTF_VOLATILE;
+
+	if (ConsumeTokenIf(TK_MEMMAP))
+		flags |= DTF_MEMMAP;
+
+	if (ConsumeTokenIf(TK_PRESERVES))
+	{
+		ConsumeToken(TK_OPEN_PARENTHESIS);
+		if (mScanner->mToken == TK_IDENT)
+		{
+			char* cp = mScanner->mTokenIdent->mString;
+			while (*cp)
+			{
+				switch (*cp)
+				{
+				case 'a':
+				case 'A':
+					flags |= DTF_ASM_PRESERVE_A;
+					break;
+				case 'x':
+				case 'X':
+					flags |= DTF_ASM_PRESERVE_X;
+					break;
+				case 'y':
+				case 'Y':
+					flags |= DTF_ASM_PRESERVE_Y;
+					break;
+				default:
+					mErrors->Error(mScanner->mLocation, EERR_ASM_INVALID_REGISTER, "Invalid register specified", mScanner->mTokenIdent);
+				}
+				cp++;
+			}
+			mScanner->NextToken();
+		}
+		ConsumeToken(TK_CLOSE_PARENTHESIS);
+	}
+
+	return flags;
+}
 
 Expression* Parser::ParseQualify(Expression* exp)
 {
@@ -6943,7 +8181,7 @@ Expression* Parser::ParseQualify(Expression* exp)
 
 	exp = exp->ConstantFold(mErrors, mDataSection);
 
-	if (dtype->mType == DT_TYPE_REFERENCE || dtype->mType == DT_TYPE_RVALUEREF)
+	if (dtype->IsReference())
 		dtype = dtype->mBase;
 
 	if (dtype->mType == DT_TYPE_STRUCT || dtype->mType == DT_TYPE_UNION)
@@ -7050,7 +8288,7 @@ Expression* Parser::ParseQualify(Expression* exp)
 						texp->mLeft = exp;
 						texp->mDecType = new Declaration(nexp->mLocation, DT_TYPE_POINTER);
 						texp->mDecType->mFlags |= DTF_CONST | DTF_DEFINED;
-						if (exp->mDecType->mType == DT_TYPE_REFERENCE)
+						if (exp->mDecType->IsReference())
 							texp->mDecType->mBase = exp->mDecType->mBase;
 						else
 							texp->mDecType->mBase = exp->mDecType;
@@ -7082,6 +8320,13 @@ Expression* Parser::ParseQualify(Expression* exp)
 						nexp->mDecType = mdec->mBase;
 						exp = nexp;
 					}
+				}
+				else if (mdec->mType == DT_CONST_INTEGER || mdec->mType == DT_CONST_FLOAT || mdec->mType == DT_CONST_POINTER || mdec->mType == DT_CONST_ADDRESS)
+				{
+					nexp = new Expression(mScanner->mLocation, EX_CONSTANT);
+					nexp->mDecValue = mdec;
+					nexp->mDecType = mdec->mBase;
+					exp = nexp;
 				}
 			}
 			else if (destructor)
@@ -7326,6 +8571,8 @@ int Parser::OverloadDistance(Declaration* fdec, Expression* pexp)
 						return NOOVERLOAD;
 				}
 			}
+			else if (ptype->mType == DT_TYPE_POINTER && etype->mType == DT_TYPE_POINTER && ptype->mBase->IsSame(etype->mBase))
+				;
 			else if (ptype->mType == DT_TYPE_POINTER && (etype->mType == DT_TYPE_ARRAY || etype->mType == DT_TYPE_POINTER) && ptype->mBase->IsSameMutable(etype->mBase))
 				dist += 2;
 			else if (ptype->mType == DT_TYPE_POINTER && etype->mType == DT_TYPE_FUNCTION && ptype->mBase->IsSame(etype))
@@ -7350,6 +8597,23 @@ int Parser::OverloadDistance(Declaration* fdec, Expression* pexp)
 			else if (ptype->mType == DT_TYPE_REFERENCE && (ptype->mBase->mFlags & DTF_CONST) && ptype->mBase->CanAssign(etype))
 			{
 				dist += 32;
+			}
+			else if (ptype->IsSimpleType() && etype->IsSimpleType() && ptype->IsConstSame(etype))
+				dist += 2;
+			else if (ptype->mType == DT_TYPE_STRUCT && etype->mType == DT_TYPE_STRUCT)
+			{
+				int	ncast = 0;
+				Declaration* ext = ex->mDecType;
+				while (ext && !ext->IsConstSame(ptype))
+				{
+					ncast++;
+					ext = ext->mBase;
+				}
+
+				if (ext)
+					dist += 32 * ncast;
+				else
+					return NOOVERLOAD;
 			}
 			else
 				return NOOVERLOAD;
@@ -7481,7 +8745,7 @@ Expression* Parser::CoerceExpression(Expression* exp, Declaration* type)
 
 	if (tdec->mType == DT_TYPE_STRUCT)
 	{
-		Declaration* fexp = tdec->mScope->Lookup(Ident::Unique("(cast)"));
+		Declaration* fexp = tdec->mScope ? tdec->mScope->Lookup(Ident::Unique("(cast)")) : nullptr;
 		if (fexp)
 		{
 			while (fexp && !fexp->mBase->mBase->IsSame(type))
@@ -7603,6 +8867,32 @@ Expression* Parser::CoerceExpression(Expression* exp, Declaration* type)
 		}
 	}
 	
+#if 1
+	if (type->mType == DT_TYPE_BOOL && tdec->mType == DT_TYPE_INTEGER)
+	{
+		Expression* ex;
+		if (exp->mType == EX_CONSTANT)
+		{
+			ex = new Expression(exp->mLocation, EX_CONSTANT);
+			if (exp->mDecValue->mInteger)
+				ex->mDecValue = TheTrueConstDeclaration;
+			else
+				ex->mDecValue = TheFalseConstDeclaration;
+		}
+		else
+		{
+			ex = new Expression(exp->mLocation, EX_RELATIONAL);
+			ex->mToken = TK_NOT_EQUAL;
+			ex->mLeft = exp;
+			ex->mRight = new Expression(exp->mLocation, EX_CONSTANT);
+			ex->mRight->mDecType = TheSignedIntTypeDeclaration;
+			ex->mRight->mDecValue =	TheZeroIntegerConstDeclaration;
+		}
+		ex->mDecType = type;
+		return ex;
+	}
+#endif
+
 	return exp;
 }
 
@@ -7723,10 +9013,20 @@ Expression * Parser::ResolveOverloadCall(Expression* exp, Expression* exp2)
 					fdec = fdec->mNext;
 				}
 #endif
-				mErrors->Error(exp->mLocation, ERRO_NO_MATCHING_FUNCTION_CALL, "No matching function call", exp->mLeft->mDecValue->mQualIdent);
+				mErrors->Error(FullLocation(exp->mLocation), ERRO_NO_MATCHING_FUNCTION_CALL, "No matching function call", exp->mLeft->mDecValue->mQualIdent);
 			}
 			else if (nbest > 1)
-				mErrors->Error(exp->mLocation, ERRO_AMBIGUOUS_FUNCTION_CALL, "Ambiguous function call", exp->mLeft->mDecValue->mQualIdent);
+			{
+#if _DEBUG
+				fdec = exp->mLeft->mDecValue;
+				while (fdec)
+				{
+					int d = OverloadDistance(fdec, exp->mRight);
+					fdec = fdec->mNext;
+				}
+#endif
+				mErrors->Error(FullLocation(exp->mLocation), ERRO_AMBIGUOUS_FUNCTION_CALL, "Ambiguous function call", exp->mLeft->mDecValue->mQualIdent);
+			}
 			else
 			{
 				assert(dbest);
@@ -7740,6 +9040,146 @@ Expression * Parser::ResolveOverloadCall(Expression* exp, Expression* exp2)
 
 		ExpandFunctionCallTemplate(exp);
 		CompleteFunctionDefaultParams(exp);
+	}
+
+	return exp;
+}
+
+Expression* Parser::ParseConstruction(Declaration* type)
+{
+	Token	otk = mScanner->mToken == TK_OPEN_PARENTHESIS ? TK_CLOSE_PARENTHESIS : TK_CLOSE_BRACE;
+
+	Expression* pexp = nullptr;
+	Expression* exp = nullptr;
+
+	Declaration* fcons = type->mScope ? type->mScope->Lookup(type->mIdent->PreMangle("+")) : nullptr;
+
+	mScanner->NextToken();
+	if (mScanner->mToken != otk)
+	{
+		pexp = ParseListExpression(false, fcons ? fcons->mBase->mParams->mNext : nullptr);
+		ConsumeToken(otk);
+	}
+	else
+		mScanner->NextToken();
+
+	if (pexp && pexp->mType != EX_LIST && pexp->mDecType->IsSame(type) && !type->mCopyConstructor)
+	{
+		// Simple copy
+		exp = pexp;
+	}
+	else
+	{
+		if (fcons)
+		{
+			Declaration* tdec = new Declaration(mScanner->mLocation, DT_VARIABLE);
+
+			tdec->mBase = type;
+			tdec->mVarIndex = mLocalIndex++;
+			tdec->mSize = type->mSize;
+			tdec->mFlags |= DTF_DEFINED | DTF_TEMPORARY;
+
+			Expression* vexp = new Expression(mScanner->mLocation, EX_VARIABLE);
+			vexp->mDecType = type;
+			vexp->mDecValue = tdec;
+
+			Expression* cexp = new Expression(mScanner->mLocation, EX_CONSTANT);
+			cexp->mDecValue = fcons;
+			cexp->mDecType = cexp->mDecValue->mBase;
+
+			Expression* fexp = new Expression(mScanner->mLocation, EX_CALL);
+			fexp->mLeft = cexp;
+
+			fexp->mRight = pexp;
+
+			Expression* texp = new Expression(mScanner->mLocation, EX_PREFIX);
+			texp->mToken = TK_BINARY_AND;
+			texp->mLeft = vexp;
+			texp->mDecType = new Declaration(mScanner->mLocation, DT_TYPE_POINTER);
+			texp->mDecType->mFlags |= DTF_CONST | DTF_DEFINED;
+			texp->mDecType->mBase = type;
+			texp->mDecType->mSize = 2;
+
+			if (fexp->mRight)
+			{
+				Expression* lexp = new Expression(mScanner->mLocation, EX_LIST);
+				lexp->mLeft = texp;
+				lexp->mRight = fexp->mRight;
+				fexp->mRight = lexp;
+			}
+			else
+				fexp->mRight = texp;
+
+			fexp = ResolveOverloadCall(fexp);
+
+			Expression* dexp = nullptr;
+			if (type->mDestructor)
+			{
+				Expression* cexp = new Expression(mScanner->mLocation, EX_CONSTANT);
+				cexp->mDecValue = type->mDestructor;
+				cexp->mDecType = cexp->mDecValue->mBase;
+
+				dexp = new Expression(mScanner->mLocation, EX_CALL);
+				dexp->mLeft = cexp;
+				dexp->mRight = texp;
+			}
+
+			Expression* nexp = new Expression(mScanner->mLocation, EX_CONSTRUCT);
+
+			nexp->mLeft = new Expression(mScanner->mLocation, EX_LIST);
+			nexp->mLeft->mLeft = fexp;
+			nexp->mLeft->mRight = dexp;
+
+			nexp->mRight = vexp;
+			nexp->mDecType = vexp->mDecType;
+
+			exp = nexp;
+		}
+		else if (pexp)
+		{
+			Expression* nexp = new Expression(mScanner->mLocation, EX_TYPECAST);
+			nexp->mDecType = type;
+			nexp->mLeft = pexp;
+			nexp = CheckOperatorOverload(nexp);
+			exp = nexp->ConstantFold(mErrors, mDataSection);
+		}
+		else if (type->IsSimpleType())
+		{
+			Expression* nexp = new Expression(mScanner->mLocation, EX_CONSTANT);
+
+			if (type->IsIntegerType())
+			{
+				nexp->mDecType = type;
+				nexp->mDecValue = TheZeroIntegerConstDeclaration;
+			}
+			else if (type->mType == DT_TYPE_FLOAT)
+			{
+				nexp->mDecType = TheFloatTypeDeclaration;
+				nexp->mDecValue = TheZeroFloatConstDeclaration;
+			}
+			else // Pointer
+			{
+				nexp->mDecType = TheNullPointerTypeDeclaration;
+				nexp->mDecValue = TheNullptrConstDeclaration;
+			}
+
+			exp = nexp;
+		}
+		else
+		{
+			Declaration* tdec = new Declaration(mScanner->mLocation, DT_VARIABLE);
+
+			tdec->mBase = type;
+			tdec->mVarIndex = mLocalIndex++;
+			tdec->mSize = type->mSize;
+			tdec->mFlags |= DTF_DEFINED | DTF_TEMPORARY;
+
+			Expression* nexp = new Expression(mScanner->mLocation, EX_VARIABLE);
+			nexp->mDecType = type;
+			nexp->mDecValue = tdec;
+
+			exp = nexp;
+		}
 	}
 
 	return exp;
@@ -7784,7 +9224,10 @@ Expression* Parser::ParsePostfixExpression(bool lhs)
 		}
 		else if (mScanner->mToken == TK_OPEN_BRACE && exp->mType == EX_TYPE)
 		{
-			exp = ParseCastExpression(exp);
+			if (exp->mDecType->HasConstructor())
+				exp = ParseConstruction(exp->mDecType);
+			else
+				exp = ParseCastExpression(exp);
 		}
 		else if (mScanner->mToken == TK_OPEN_PARENTHESIS)
 		{
@@ -7798,121 +9241,13 @@ Expression* Parser::ParsePostfixExpression(bool lhs)
 
 			if (exp->mType == EX_TYPE)
 			{
-				Expression * pexp = nullptr;
-
 				if (exp->mDecType->mTemplate)
 				{
 					mErrors->Error(mScanner->mLocation, EERR_TEMPLATE_PARAMS, "Missing template parameters", exp->mDecType->mQualIdent);
 					exp->mDecType = TheConstVoidTypeDeclaration;
 				}
 
-				Declaration* fcons = exp->mDecType->mScope ? exp->mDecType->mScope->Lookup(exp->mDecType->mIdent->PreMangle("+")) : nullptr;
-
-				mScanner->NextToken();
-				if (mScanner->mToken != TK_CLOSE_PARENTHESIS)
-				{
-					pexp = ParseListExpression(false, fcons ? fcons->mBase->mParams->mNext : nullptr);
-					ConsumeToken(TK_CLOSE_PARENTHESIS);
-				}
-				else
-					mScanner->NextToken();
-
-				if (pexp && pexp->mType != EX_LIST && pexp->mDecType->IsSame(exp->mDecType))
-				{
-					// Simple copy
-					exp = pexp;
-				}
-				else
-				{
-					if (fcons)
-					{
-						Declaration* tdec = new Declaration(mScanner->mLocation, DT_VARIABLE);
-
-						tdec->mBase = exp->mDecType;
-						tdec->mVarIndex = mLocalIndex++;
-						tdec->mSize = exp->mDecType->mSize;
-						tdec->mFlags |= DTF_DEFINED | DTF_TEMPORARY;
-
-						Expression* vexp = new Expression(mScanner->mLocation, EX_VARIABLE);
-						vexp->mDecType = exp->mDecType;
-						vexp->mDecValue = tdec;
-
-						Expression* cexp = new Expression(mScanner->mLocation, EX_CONSTANT);
-						cexp->mDecValue = fcons;
-						cexp->mDecType = cexp->mDecValue->mBase;
-
-						Expression* fexp = new Expression(mScanner->mLocation, EX_CALL);
-						fexp->mLeft = cexp;
-
-						fexp->mRight = pexp;
-
-						Expression* texp = new Expression(mScanner->mLocation, EX_PREFIX);
-						texp->mToken = TK_BINARY_AND;
-						texp->mLeft = vexp;
-						texp->mDecType = new Declaration(mScanner->mLocation, DT_TYPE_POINTER);
-						texp->mDecType->mFlags |= DTF_CONST | DTF_DEFINED;
-						texp->mDecType->mBase = exp->mDecType;
-						texp->mDecType->mSize = 2;
-
-						if (fexp->mRight)
-						{
-							Expression* lexp = new Expression(mScanner->mLocation, EX_LIST);
-							lexp->mLeft = texp;
-							lexp->mRight = fexp->mRight;
-							fexp->mRight = lexp;
-						}
-						else
-							fexp->mRight = texp;
-
-						fexp = ResolveOverloadCall(fexp);
-
-						Expression* dexp = nullptr;
-						if (exp->mDecType->mDestructor)
-						{
-							Expression* cexp = new Expression(mScanner->mLocation, EX_CONSTANT);
-							cexp->mDecValue = exp->mDecType->mDestructor;
-							cexp->mDecType = cexp->mDecValue->mBase;
-
-							dexp = new Expression(mScanner->mLocation, EX_CALL);
-							dexp->mLeft = cexp;
-							dexp->mRight = texp;
-						}
-
-						Expression* nexp = new Expression(mScanner->mLocation, EX_CONSTRUCT);
-
-						nexp->mLeft = new Expression(mScanner->mLocation, EX_LIST);
-						nexp->mLeft->mLeft = fexp;
-						nexp->mLeft->mRight = dexp;
-
-						nexp->mRight = vexp;
-						nexp->mDecType = vexp->mDecType;
-
-						exp = nexp;
-					}
-					else if (pexp)
-					{
-						Expression* nexp = new Expression(mScanner->mLocation, EX_TYPECAST);
-						nexp->mDecType = exp->mDecType;
-						nexp->mLeft = pexp;
-						nexp = CheckOperatorOverload(nexp);
-						exp = nexp->ConstantFold(mErrors, mDataSection);
-					}
-					else
-					{
-						Declaration* tdec = new Declaration(mScanner->mLocation, DT_VARIABLE);
-
-						tdec->mBase = exp->mDecType;
-						tdec->mVarIndex = mLocalIndex++;
-						tdec->mSize = exp->mDecType->mSize;
-						tdec->mFlags |= DTF_DEFINED | DTF_TEMPORARY;
-
-						Expression* nexp = new Expression(mScanner->mLocation, EX_VARIABLE);
-						nexp->mDecType = exp->mDecType;
-						nexp->mDecValue = tdec;
-
-						exp = nexp;
-					}
-				}
+				exp = ParseConstruction(exp->mDecType);
 			}
 			else
 			{
@@ -7940,7 +9275,7 @@ Expression* Parser::ParsePostfixExpression(bool lhs)
 							thisExp = new Expression(exp->mLocation, EX_PREFIX);
 							thisExp->mToken = TK_BINARY_AND;
 							thisExp->mLeft = exp;
-							thisExp->mDecType = exp->mDecType->BuildPointer(exp->mLocation);
+							thisExp->mDecType = tdec->BuildPointer(exp->mLocation);
 
 							exp = new Expression(exp->mLocation, EX_CONSTANT);
 							exp->mDecValue = mdec;
@@ -8141,6 +9476,8 @@ Expression* Parser::ParseNewOperator(void)
 	}
 
 	Declaration* dec = ParseBaseTypeDeclaration(0, true);
+	while (ConsumeTokenIf(TK_MUL))
+		dec = dec->BuildPointer(mScanner->mLocation);
 
 	if (dec->mFlags & DTF_PURE_VIRTUAL)
 		mErrors->Error(dec->mLocation, ERRR_INSTANTIATE_ABSTRACT_CLASS, "Cannot instantiate abstract class", dec->mIdent);
@@ -8199,14 +9536,11 @@ Expression* Parser::ParseNewOperator(void)
 
 			Expression* pexp = new Expression(mScanner->mLocation, EX_LIST);
 			pexp->mLeft = vexp;
-			pexp->mRight = new Expression(mScanner->mLocation, EX_INDEX);
+			pexp->mRight = new Expression(mScanner->mLocation, EX_BINARY);
+			pexp->mRight->mToken = TK_ADD;
 			pexp->mRight->mDecType = pexp->mLeft->mDecType;
 			pexp->mRight->mLeft = csexp;
-			pexp->mRight->mRight = new Expression(mScanner->mLocation, EX_CONSTANT);
-			pexp->mRight->mRight->mDecType = TheSignedIntTypeDeclaration;
-			pexp->mRight->mRight->mDecValue = new Declaration(mScanner->mLocation, DT_CONST_INTEGER);
-			pexp->mRight->mRight->mDecValue->mBase = TheSignedIntTypeDeclaration;
-			pexp->mRight->mRight->mDecValue->mInteger = -1;
+			pexp->mRight->mRight = mexp->mRight;
 
 			Expression* cexp = new Expression(mScanner->mLocation, EX_CONSTANT);
 			cexp->mDecValue = mdec;
@@ -8223,8 +9557,10 @@ Expression* Parser::ParseNewOperator(void)
 			coexp->mLeft->mLeft = vexp;
 			coexp->mLeft->mRight = nuexp;
 			coexp->mRight = new Expression(mScanner->mLocation, EX_LIST);
+			coexp->mRight->mDecType = vexp->mDecType;
 			coexp->mRight->mLeft = vexp;
 			coexp->mRight->mRight = new Expression(mScanner->mLocation, EX_SEQUENCE);
+			coexp->mRight->mRight->mDecType = vexp->mDecType;
 			coexp->mRight->mRight->mLeft = dexp;
 			coexp->mRight->mRight->mRight = vexp;
 			coexp->mDecType = vexp->mDecType;
@@ -8265,10 +9601,15 @@ Expression* Parser::ParseNewOperator(void)
 				{
 					if (pexp->mDecType->IsSame(dec))
 						mdec = dec->mCopyConstructor;
-					else if (pexp->mDecType->mType == DT_TYPE_REFERENCE && pexp->mDecType->mBase->IsSame(dec))
+					else if (pexp->mDecType->mType == DT_TYPE_REFERENCE && pexp->mDecType->mBase->IsConstSame(dec))
 						mdec = dec->mCopyConstructor;
 					else if (pexp->mDecType->mType == DT_TYPE_RVALUEREF && pexp->mDecType->mBase->IsSame(dec))
-						mdec = dec->mMoveConstructor;
+					{
+						if (dec->mMoveConstructor)
+							mdec = dec->mMoveConstructor;
+						else
+							mdec = dec->mCopyConstructor;
+					}
 				}
 			}
 			else
@@ -8345,12 +9686,48 @@ Expression* Parser::ParseNewOperator(void)
 
 				nexp = new Expression(mScanner->mLocation, EX_PREFIX);
 				nexp->mToken = TK_BINARY_AND;
-				nexp->mDecType = nexp->mDecType;
+				nexp->mDecType = iexp->mDecType;
 				nexp->mLeft = iexp;
 			}
 			else if (pexp)
 			{
 				mErrors->Error(mScanner->mLocation, ERRO_NO_MATCHING_FUNCTION_CALL, "No matching constructor", dec->mIdent);
+			}
+			else if (nexp->mDecType->mBase->IsSimpleType())
+			{
+				Expression* cexp = new Expression(mScanner->mLocation, EX_CONSTANT);
+
+				if (nexp->mDecType->mBase->IsIntegerType())
+				{
+					cexp->mDecType = TheSignedIntTypeDeclaration;
+					cexp->mDecValue = TheZeroIntegerConstDeclaration;
+				}
+				else if (nexp->mDecType->mBase->mType == DT_TYPE_FLOAT)
+				{
+					cexp->mDecType = TheFloatTypeDeclaration;
+					cexp->mDecValue = TheZeroFloatConstDeclaration;
+				}
+				else // Pointer
+				{
+					cexp->mDecType = TheNullPointerTypeDeclaration;
+					cexp->mDecValue = TheNullptrConstDeclaration;
+				}
+
+				Expression* dexp = new Expression(mScanner->mLocation, EX_PREFIX);
+				dexp->mToken = TK_MUL;
+				dexp->mLeft = nexp;
+				dexp->mDecType = nexp->mDecType->mBase;
+
+				Expression* iexp = new Expression(mScanner->mLocation, EX_INITIALIZATION);
+				iexp->mToken = TK_ASSIGN;
+				iexp->mLeft = dexp;
+				iexp->mRight = cexp;
+				iexp->mDecType = nexp->mDecType;
+
+				nexp = new Expression(mScanner->mLocation, EX_PREFIX);
+				nexp->mToken = TK_BINARY_AND;
+				nexp->mDecType = iexp->mDecType;
+				nexp->mLeft = iexp;
 			}
 		}
 	}
@@ -8360,7 +9737,8 @@ Expression* Parser::ParseNewOperator(void)
 
 Expression* Parser::ParsePrefixExpression(bool lhs)
 {
-	if (mScanner->mToken == TK_SUB || mScanner->mToken == TK_BINARY_NOT || mScanner->mToken == TK_LOGICAL_NOT || 
+	if (mScanner->mToken == TK_SUB || mScanner->mToken == TK_ADD ||
+		mScanner->mToken == TK_BINARY_NOT || mScanner->mToken == TK_LOGICAL_NOT || 
 		mScanner->mToken == TK_MUL || mScanner->mToken == TK_INC || mScanner->mToken == TK_DEC || mScanner->mToken == TK_BINARY_AND ||
 		mScanner->mToken == TK_BANKOF || mScanner->mToken == TK_NEW || mScanner->mToken == TK_DELETE)
 	{
@@ -8534,6 +9912,20 @@ Expression* Parser::ParsePrefixExpression(bool lhs)
 		return ParsePostfixExpression(lhs);
 }
 
+static Declaration* CombinedIntType(Declaration* ld, Declaration* rd)
+{
+	if (ld->mSize < 2 && rd->mSize < 2)
+		return TheSignedIntTypeDeclaration;
+	else if (ld->mSize > rd->mSize)
+		return ld;
+	else if (rd->mSize > ld->mSize)
+		return rd;
+	else if (!(rd->mFlags & DTF_SIGNED))
+		return rd;
+	else
+		return ld;
+}
+
 Expression* Parser::ParseMulExpression(bool lhs)
 {
 	Expression* exp = ParsePrefixExpression(lhs);
@@ -8552,6 +9944,8 @@ Expression* Parser::ParseMulExpression(bool lhs)
 
 		if (nexp->mLeft->mDecType->NonRefBase()->mType == DT_TYPE_FLOAT || nexp->mRight->mDecType->NonRefBase()->mType == DT_TYPE_FLOAT)
 			nexp->mDecType = TheFloatTypeDeclaration;
+		else if (exp->mDecType->IsIntegerType() && nexp->mRight->mDecType->IsIntegerType())
+			nexp->mDecType = CombinedIntType(exp->mDecType, nexp->mRight->mDecType);
 		else
 			nexp->mDecType = exp->mDecType;
 
@@ -8559,7 +9953,7 @@ Expression* Parser::ParseMulExpression(bool lhs)
 
 		exp = exp->ConstantFold(mErrors, mDataSection);
 	}
-
+	
 	return exp;
 }
 
@@ -8771,7 +10165,7 @@ Expression* Parser::ParseAddExpression(bool lhs)
 				if (mCompilerOptions & COPT_CPLUSPLUS)
 					mErrors->Error(mScanner->mLocation, ERRR_INVALID_VOID_POINTER_ARITHMETIC, "Invalid arithmetic on void pointer");
 				else
-					mErrors->Error(mScanner->mLocation, EWARN_INVALID_VOID_POINTER_ARITHMETIC, "Invalid arithmetic on void pointer");				
+					mErrors->Error(mScanner->mLocation, EWARN_INVALID_VOID_POINTER_ARITHMETIC, "Invalid arithmetic on void pointer");
 			}
 			nexp->mDecType = nexp->mLeft->mDecType;
 		}
@@ -8808,6 +10202,12 @@ Expression* Parser::ParseAddExpression(bool lhs)
 		}
 		else if (nexp->mLeft->mDecType->mType == DT_TYPE_FLOAT || nexp->mRight->mDecType->mType == DT_TYPE_FLOAT)
 			nexp->mDecType = TheFloatTypeDeclaration;
+		else if (nexp->mToken == TK_SUB &&
+			(nexp->mLeft->mDecType->mType == DT_TYPE_POINTER || nexp->mLeft->mDecType->mType == DT_TYPE_ARRAY) &&
+			(nexp->mRight->mDecType->mType == DT_TYPE_POINTER || nexp->mRight->mDecType->mType == DT_TYPE_ARRAY))
+			nexp->mDecType = TheSignedIntTypeDeclaration;
+		else if (exp->mDecType->IsIntegerType() && nexp->mRight->mDecType->IsIntegerType())
+			nexp->mDecType = CombinedIntType(exp->mDecType, nexp->mRight->mDecType);
 		else
 			nexp->mDecType = exp->mDecType;
 
@@ -8998,6 +10398,7 @@ Expression* Parser::ParseConditionalExpression(bool lhs)
 		ConsumeToken(TK_COLON);
 		texp->mRight = ParseConditionalExpression(false);
 		
+		texp->mDecType = texp->mLeft->mDecType;
 		nexp->mDecType = texp->mLeft->mDecType;
 		exp = nexp->ConstantFold(mErrors, mDataSection);
 	}
@@ -9027,11 +10428,39 @@ Expression* Parser::ParseParenthesisExpression(void)
 	return exp;
 }
 
+void Parser::ParseStaticAssert(void)
+{
+	if (ConsumeToken(TK_OPEN_PARENTHESIS))
+	{
+		Expression* exp = ParseExpression(false);
+		exp = exp->ConstantFold(mErrors, mDataSection);
+		if (exp->mType == EX_CONSTANT && exp->mDecType->IsIntegerType() && exp->mDecValue->mInteger)
+		{
+			if (ConsumeTokenIf(TK_COMMA))
+				mScanner->NextToken();
+		}
+		else
+		{
+			if (ConsumeTokenIf(TK_COMMA) && mScanner->mToken == TK_STRING)
+			{
+				mErrors->Error(mScanner->mLocation, EERR_STATIC_ASSERT, "static assertion failed: ", (const char*)mScanner->mTokenString);
+				mScanner->NextToken();
+			}
+			else
+				mErrors->Error(mScanner->mLocation, EERR_STATIC_ASSERT, "static assertion failed");
+		}
+
+		ConsumeToken(TK_CLOSE_PARENTHESIS);
+	}
+}
+
 Expression* Parser::CheckOperatorOverload(Expression* exp)
 {
 	if (mCompilerOptions & COPT_CPLUSPLUS)
 	{
-		if (exp->mType == EX_ASSIGNMENT)
+		if (!exp->mLeft || !exp->mLeft->mDecType)
+			;
+		else if (exp->mType == EX_ASSIGNMENT)
 		{
 			Declaration* tdec = exp->mLeft->mDecType;
 			while (tdec->mType == DT_TYPE_REFERENCE || tdec->mType == DT_TYPE_RVALUEREF)
@@ -9096,7 +10525,7 @@ Expression* Parser::CheckOperatorOverload(Expression* exp)
 						nexp2->mRight->mRight = exp->mRight;
 					}
 
-					Declaration* mdec = tdec->mScope->Lookup(opident);
+					Declaration* mdec = tdec->mScope ? tdec->mScope->Lookup(opident) : nullptr;
 					if (mdec)
 					{
 						Expression * nexp = new Expression(mScanner->mLocation, EX_CALL);
@@ -9885,6 +11314,8 @@ Expression* Parser::ParseStatement(void)
 	{
 		mScanner->NextToken();
 		ParsePragma();
+		if (mScanner->mToken == TK_CLOSE_BRACE)
+			return nullptr;
 	}
 	
 	if (mScanner->mToken == TK_OPEN_BRACE)
@@ -9901,21 +11332,24 @@ Expression* Parser::ParseStatement(void)
 			do
 			{
 				Expression* nexp = ParseStatement();
-				if (exp)
+				if (nexp)
 				{
-					if (!pexp)
+					if (exp)
 					{
-						pexp = new Expression(mScanner->mLocation, EX_SEQUENCE);
-						pexp->mLeft = exp;
-						exp = pexp;
+						if (!pexp)
+						{
+							pexp = new Expression(mScanner->mLocation, EX_SEQUENCE);
+							pexp->mLeft = exp;
+							exp = pexp;
+						}
+
+						pexp->mRight = new Expression(mScanner->mLocation, EX_SEQUENCE);
+						pexp = pexp->mRight;
+						pexp->mLeft = nexp;
 					}
-					
-					pexp->mRight = new Expression(mScanner->mLocation, EX_SEQUENCE);
-					pexp = pexp->mRight;
-					pexp->mLeft = nexp;
+					else
+						exp = nexp;
 				}
-				else
-					exp = nexp;
 
 			} while (mScanner->mToken != TK_CLOSE_BRACE && mScanner->mToken != TK_EOF);
 
@@ -9974,7 +11408,7 @@ Expression* Parser::ParseStatement(void)
 			else
 			{
 				exp = new Expression(mScanner->mLocation, EX_IF);
-				exp->mLeft = CoerceExpression(CleanupExpression(ParseParenthesisExpression()), TheBoolTypeDeclaration);
+				exp->mLeft = CleanupExpression(CoerceExpression(ParseParenthesisExpression(), TheBoolTypeDeclaration));
 				exp->mRight = new Expression(mScanner->mLocation, EX_ELSE);
 				exp->mRight->mLeft = ParseStatement();
 				if (mScanner->mToken == TK_ELSE)
@@ -9995,7 +11429,7 @@ Expression* Parser::ParseStatement(void)
 			mScope = scope;
 
 			exp = new Expression(mScanner->mLocation, EX_WHILE);
-			exp->mLeft = CoerceExpression(CleanupExpression(ParseParenthesisExpression()), TheBoolTypeDeclaration);
+			exp->mLeft = CleanupExpression(CoerceExpression(ParseParenthesisExpression(), TheBoolTypeDeclaration));
 			exp->mRight = ParseStatement();
 
 			mScope->End(mScanner->mLocation);
@@ -10009,7 +11443,7 @@ Expression* Parser::ParseStatement(void)
 			if (mScanner->mToken == TK_WHILE)
 			{
 				mScanner->NextToken();
-				exp->mLeft = CoerceExpression(CleanupExpression(ParseParenthesisExpression()), TheBoolTypeDeclaration);
+				exp->mLeft = CleanupExpression(CoerceExpression(ParseParenthesisExpression(), TheBoolTypeDeclaration));
 				ConsumeToken(TK_SEMICOLON);
 			}
 			else
@@ -10045,7 +11479,6 @@ Expression* Parser::ParseStatement(void)
 						{
 							Declaration* iterVarDec = new Declaration(mScanner->mLocation, DT_VARIABLE);
 							iterVarDec->mBase = containerExp->mDecType->mBase->BuildPointer(mScanner->mLocation);
-							iterVarDec->mBase = containerExp->mDecType->mBase->BuildPointer(mScanner->mLocation);
 							iterVarDec->mVarIndex = mLocalIndex++;
 							iterVarDec->mSize = iterVarDec->mBase->mSize;
 							iterVarDec->mFlags |= DTF_DEFINED;
@@ -10059,6 +11492,8 @@ Expression* Parser::ParseStatement(void)
 							Declaration* valueVarDec = initExp->mDecValue;
 							valueVarDec->mBase = valueVarDec->mBase->DeduceAuto(containerExp->mDecType->mBase);
 							valueVarDec->mSize = valueVarDec->mBase->mSize;
+
+							ExpandStructuredBinding(valueVarDec);
 
 							initExp = new Expression(mScanner->mLocation, EX_LIST);
 							initExp->mLeft = new Expression(mScanner->mLocation, EX_INITIALIZATION);
@@ -10084,7 +11519,7 @@ Expression* Parser::ParseStatement(void)
 							initExp->mRight->mRight->mRight->mDecValue = new Declaration(mScanner->mLocation, DT_CONST_INTEGER);
 							initExp->mRight->mRight->mRight->mDecValue->mBase = TheSignedIntTypeDeclaration;
 							initExp->mRight->mRight->mRight->mDecValue->mSize = 2;
-							initExp->mRight->mRight->mRight->mDecValue->mInteger = containerExp->mDecType->mSize;
+							initExp->mRight->mRight->mRight->mDecValue->mInteger = containerExp->mDecType->mSize / containerExp->mDecType->mBase->mSize;
 
 							iterateExp = new Expression(mScanner->mLocation, EX_PREINCDEC);
 							iterateExp->mToken = TK_INC;
@@ -10101,7 +11536,10 @@ Expression* Parser::ParseStatement(void)
 							conditionExp->mRight->mDecType = endVarDec->mBase;
 							conditionExp->mRight->mDecValue = endVarDec;
 
-							bodyExp = new Expression(mScanner->mLocation, EX_ASSIGNMENT);
+							if (valueVarDec->mBase->IsReference())
+								bodyExp = new Expression(mScanner->mLocation, EX_INITIALIZATION);
+							else
+								bodyExp = new Expression(mScanner->mLocation, EX_ASSIGNMENT);
 							bodyExp->mToken = TK_ASSIGN;
 							bodyExp->mLeft = new Expression(mScanner->mLocation, EX_VARIABLE);
 							bodyExp->mLeft->mDecType = valueVarDec->mBase;
@@ -10120,10 +11558,45 @@ Expression* Parser::ParseStatement(void)
 
 							if (fbegin && fend)
 							{
-								Expression* cexp = new Expression(mScanner->mLocation, EX_PREFIX);
-								cexp->mToken = TK_BINARY_AND;
-								cexp->mDecType = containerExp->mDecType->BuildPointer(mScanner->mLocation);
-								cexp->mLeft = containerExp;
+								Expression* cpexp = new Expression(mScanner->mLocation, EX_PREFIX);
+								cpexp->mToken = TK_BINARY_AND;
+								cpexp->mDecType = containerExp->mDecType->BuildPointer(mScanner->mLocation);
+								cpexp->mLeft = containerExp;
+
+								Declaration* cpvar = AllocTempVar(cpexp->mDecType);
+
+								Expression* cexp = new Expression(exp->mLocation, EX_VARIABLE);
+								cexp->mDecType = cpexp->mDecType;
+								cexp->mDecValue = cpvar;
+
+								Expression* cinitexp = new Expression(exp->mLocation, EX_INITIALIZATION);
+								cinitexp->mToken = TK_ASSIGN;
+								cinitexp->mLeft = cexp;
+								cinitexp->mRight = cpexp;
+								cinitexp->mDecType = exp->mDecType;
+
+								Expression* cbegin = new Expression(mScanner->mLocation, EX_CALL);
+								cbegin->mDecType = fbegin->mBase->mBase;
+								cbegin->mLeft = new Expression(mScanner->mLocation, EX_CONSTANT);
+								cbegin->mLeft->mDecType = fbegin->mBase;
+								cbegin->mLeft->mDecValue = fbegin;
+								cbegin->mRight = cexp;
+
+								Expression* cend = new Expression(mScanner->mLocation, EX_CALL);
+								cend->mDecType = fend->mBase->mBase;
+								cend->mLeft = new Expression(mScanner->mLocation, EX_CONSTANT);
+								cend->mLeft->mDecType = fend->mBase;
+								cend->mLeft->mDecValue = fend;
+								cend->mRight = cexp;
+
+								ResolveOverloadCall(cbegin);
+								ResolveOverloadCall(cend);
+
+								fbegin = cbegin->mLeft->mDecValue;
+								fend = cend->mLeft->mDecValue;
+
+								cbegin->mDecType = fbegin->mBase->mBase;
+								cend->mDecType = fend->mBase->mBase;
 
 								Declaration* iterVarDec = new Declaration(mScanner->mLocation, DT_VARIABLE);
 								iterVarDec->mBase = fbegin->mBase->mBase->NonRefBase();
@@ -10140,29 +11613,26 @@ Expression* Parser::ParseStatement(void)
 								Declaration* valueVarDec = initExp->mDecValue;
 
 								initExp = new Expression(mScanner->mLocation, EX_LIST);
-								initExp->mLeft = new Expression(mScanner->mLocation, EX_INITIALIZATION);
-								initExp->mLeft->mToken = TK_ASSIGN;
-								initExp->mLeft->mLeft = new Expression(mScanner->mLocation, EX_VARIABLE);
-								initExp->mLeft->mLeft->mDecType = iterVarDec->mBase;
-								initExp->mLeft->mLeft->mDecValue = iterVarDec;
-								initExp->mLeft->mRight = new Expression(mScanner->mLocation, EX_CALL);
-								initExp->mLeft->mRight->mDecType = fbegin->mBase->mBase;
-								initExp->mLeft->mRight->mLeft = new Expression(mScanner->mLocation, EX_CONSTANT);
-								initExp->mLeft->mRight->mLeft->mDecType = fbegin->mBase;
-								initExp->mLeft->mRight->mLeft->mDecValue = fbegin;
-								initExp->mLeft->mRight->mRight = cexp;
+								initExp->mLeft = cinitexp;
 
-								initExp->mRight = new Expression(mScanner->mLocation, EX_INITIALIZATION);
-								initExp->mRight->mToken = TK_ASSIGN;
-								initExp->mRight->mLeft = new Expression(mScanner->mLocation, EX_VARIABLE);
-								initExp->mRight->mLeft->mDecType = endVarDec->mBase;
-								initExp->mRight->mLeft->mDecValue = endVarDec;
-								initExp->mRight->mRight = new Expression(mScanner->mLocation, EX_CALL);
-								initExp->mRight->mRight->mDecType = fend->mBase->mBase;
-								initExp->mRight->mRight->mLeft = new Expression(mScanner->mLocation, EX_CONSTANT);
-								initExp->mRight->mRight->mLeft->mDecType = fend->mBase;
-								initExp->mRight->mRight->mLeft->mDecValue = fend;
-								initExp->mRight->mRight->mRight = cexp;
+								Expression* iinitExp;
+
+								iinitExp = new Expression(mScanner->mLocation, EX_LIST);
+								iinitExp->mLeft = new Expression(mScanner->mLocation, EX_INITIALIZATION);
+								iinitExp->mLeft->mToken = TK_ASSIGN;
+								iinitExp->mLeft->mLeft = new Expression(mScanner->mLocation, EX_VARIABLE);
+								iinitExp->mLeft->mLeft->mDecType = iterVarDec->mBase;
+								iinitExp->mLeft->mLeft->mDecValue = iterVarDec;
+								iinitExp->mLeft->mRight = cbegin;
+
+								iinitExp->mRight = new Expression(mScanner->mLocation, EX_INITIALIZATION);
+								iinitExp->mRight->mToken = TK_ASSIGN;
+								iinitExp->mRight->mLeft = new Expression(mScanner->mLocation, EX_VARIABLE);
+								iinitExp->mRight->mLeft->mDecType = endVarDec->mBase;
+								iinitExp->mRight->mLeft->mDecValue = endVarDec;
+								iinitExp->mRight->mRight = cend;
+
+								initExp->mRight = iinitExp;
 
 								iterateExp = new Expression(mScanner->mLocation, EX_PREINCDEC);
 								iterateExp->mToken = TK_INC;
@@ -10199,6 +11669,8 @@ Expression* Parser::ParseStatement(void)
 								valueVarDec->mBase = valueVarDec->mBase->DeduceAuto(bodyExp->mRight->mDecType);
 								valueVarDec->mSize = valueVarDec->mBase->mSize;
 
+								ExpandStructuredBinding(valueVarDec);
+
 								bodyExp->mLeft->mDecType = valueVarDec->mBase;
 								bodyExp->mLeft->mDecValue = valueVarDec;
 								bodyExp = CheckOperatorOverload(bodyExp);
@@ -10221,7 +11693,7 @@ Expression* Parser::ParseStatement(void)
 
 					// Condition
 					if (mScanner->mToken != TK_SEMICOLON)
-						conditionExp = CoerceExpression(CleanupExpression(ParseListExpression(false)), TheBoolTypeDeclaration);
+						conditionExp = CleanupExpression(CoerceExpression(ParseListExpression(false), TheBoolTypeDeclaration));
 
 					if (mScanner->mToken == TK_SEMICOLON)
 						mScanner->NextToken();
@@ -10254,31 +11726,49 @@ Expression* Parser::ParseStatement(void)
 				if (unrollLoop > 1 && initExp && iterateExp && conditionExp)
 				{
 					if ((initExp->mType == EX_ASSIGNMENT || initExp->mType == EX_INITIALIZATION) && initExp->mLeft->mType == EX_VARIABLE && initExp->mRight->mType == EX_CONSTANT &&
-						(iterateExp->mType == EX_POSTINCDEC || iterateExp->mType == EX_PREINCDEC || iterateExp->mType == EX_ASSIGNMENT && iterateExp->mToken == TK_ASSIGN_ADD && iterateExp->mRight->mType == EX_CONSTANT) && 
+						(iterateExp->mType == EX_POSTINCDEC || iterateExp->mType == EX_PREINCDEC || iterateExp->mType == EX_ASSIGNMENT && (iterateExp->mToken == TK_ASSIGN_ADD || iterateExp->mToken == TK_ASSIGN_SUB) && iterateExp->mRight->mType == EX_CONSTANT) && 
 						iterateExp->mLeft->IsSame(initExp->mLeft) &&
-						conditionExp->mType == EX_RELATIONAL && (conditionExp->mToken == TK_LESS_THAN || conditionExp->mToken == TK_GREATER_THAN || conditionExp->mToken == TK_LESS_EQUAL || conditionExp->mToken == TK_GREATER_EQUAL) && conditionExp->mLeft->IsSame(initExp->mLeft) && conditionExp->mRight->mType == EX_CONSTANT)
+						(conditionExp->mType == EX_RELATIONAL && 
+							(conditionExp->mToken == TK_LESS_THAN || conditionExp->mToken == TK_GREATER_THAN || conditionExp->mToken == TK_LESS_EQUAL || conditionExp->mToken == TK_GREATER_EQUAL) && 
+							conditionExp->mLeft->IsSame(initExp->mLeft) && 
+							conditionExp->mRight->mType == EX_CONSTANT ||
+						 conditionExp->IsSame(initExp->mLeft)))
 					{
-						if (initExp->mRight->mDecValue->mType == DT_CONST_INTEGER && conditionExp->mRight->mDecValue->mType == DT_CONST_INTEGER)
+						if (initExp->mRight->mDecValue->mType == DT_CONST_INTEGER && (conditionExp->mType == EX_VARIABLE || conditionExp->mRight->mDecValue->mType == DT_CONST_INTEGER))
 						{
 							int	startValue = int(initExp->mRight->mDecValue->mInteger);
-							int	endValue = int(conditionExp->mRight->mDecValue->mInteger);
+							int	endValue = 0;
 							int	stepValue = 1;
 
-							if (conditionExp->mToken == TK_LESS_EQUAL)
-							{
-								endValue++;
-								conditionExp->mToken = TK_LESS_THAN;
-							}
-							else if (conditionExp->mToken == TK_GREATER_EQUAL)
-							{
-								endValue--;
-								conditionExp->mToken = TK_GREATER_THAN;
-							}
-
 							if (iterateExp->mType == EX_ASSIGNMENT)
-								stepValue = int(iterateExp->mRight->mDecValue->mInteger);
+							{
+								if (iterateExp->mToken == TK_ASSIGN_ADD)
+									stepValue = int(iterateExp->mRight->mDecValue->mInteger);
+								else
+									stepValue = - int(iterateExp->mRight->mDecValue->mInteger);
+							}
 							else if (iterateExp->mToken == TK_DEC)
 								stepValue = -1;
+
+							if (conditionExp->mType == EX_RELATIONAL)
+							{
+								endValue = int(conditionExp->mRight->mDecValue->mInteger);
+
+								if (conditionExp->mToken == TK_LESS_EQUAL)
+								{
+									endValue++;
+									conditionExp->mToken = TK_LESS_THAN;
+								}
+								else if (conditionExp->mToken == TK_GREATER_EQUAL)
+								{
+									endValue--;
+									conditionExp->mToken = TK_GREATER_THAN;
+								}
+							}
+							else if (stepValue > 0 && startValue >= 0)
+							{
+								endValue = 1 << (initExp->mLeft->mDecValue->mSize * 8);
+							}
 
 							if (unrollPage)
 							{
@@ -10337,6 +11827,22 @@ Expression* Parser::ParseStatement(void)
 								bexp = bexp->mRight;
 								bexp->mLeft = dexp;
 
+								if (conditionExp->mType == EX_RELATIONAL)
+								{
+									conditionExp->mRight->mDecValue = conditionExp->mRight->mDecValue->Clone();
+								}
+								else
+								{
+									conditionExp = new Expression(conditionExp->mLocation, EX_RELATIONAL);
+									conditionExp->mDecType = TheBoolTypeDeclaration;
+									conditionExp->mToken = stepValue < 0 ? TK_GREATER_THAN : TK_LESS_THAN;
+									conditionExp->mLeft = initExp->mLeft;
+									conditionExp->mRight = new Expression(conditionExp->mLocation, EX_CONSTANT);
+									conditionExp->mRight->mDecType = conditionExp->mDecType;
+									conditionExp->mRight->mDecValue = new Declaration(conditionExp->mLocation, DT_CONST_INTEGER);
+									conditionExp->mRight->mDecValue->mBase = conditionExp->mRight->mDecType;
+								}
+
 								conditionExp->mRight->mDecValue->mInteger = numIterations;
 
 								if (remain)
@@ -10360,13 +11866,28 @@ Expression* Parser::ParseStatement(void)
 							}
 							else
 							{
-								int	numSteps = (endValue - startValue) / stepValue;
+								int	numSteps = stepValue > 0 ? (endValue - startValue + stepValue - 1) / stepValue : (endValue - startValue + stepValue + 1) / stepValue;
 								int	remain = numSteps % unrollLoop;
 								endValue -= remain * stepValue;
 
+								if (conditionExp->mType == EX_RELATIONAL)
+								{
+									conditionExp->mRight->mDecValue = conditionExp->mRight->mDecValue->Clone();
+								}
+								else
+								{
+									conditionExp = new Expression(conditionExp->mLocation, EX_RELATIONAL);
+									conditionExp->mDecType = TheBoolTypeDeclaration;
+									conditionExp->mToken = stepValue < 0 ? TK_GREATER_THAN : TK_LESS_THAN;
+									conditionExp->mLeft = initExp->mLeft;
+									conditionExp->mRight = new Expression(conditionExp->mLocation, EX_CONSTANT);
+									conditionExp->mRight->mDecType = conditionExp->mDecType;
+									conditionExp->mRight->mDecValue = new Declaration(conditionExp->mLocation, DT_CONST_INTEGER);
+									conditionExp->mRight->mDecValue->mBase = conditionExp->mRight->mDecType;
+								}
 								conditionExp->mRight->mDecValue->mInteger = endValue;
 
-								Expression* unrollBody = new Expression(mScanner->mLocation, EX_SEQUENCE);
+								Expression* unrollBody = new Expression(mScanner->mLocation, EX_FORBODY);
 								unrollBody->mLeft = bodyExp;
 								Expression* bexp = unrollBody;
 								if ((endValue - startValue) * stepValue > 0)
@@ -10376,7 +11897,7 @@ Expression* Parser::ParseStatement(void)
 										bexp->mRight = new Expression(mScanner->mLocation, EX_SEQUENCE);
 										bexp = bexp->mRight;
 										bexp->mLeft = iterateExp;
-										bexp->mRight = new Expression(mScanner->mLocation, EX_SEQUENCE);
+										bexp->mRight = new Expression(mScanner->mLocation, EX_FORBODY);
 										bexp = bexp->mRight;
 										bexp->mLeft = bodyExp;
 									}
@@ -10386,16 +11907,21 @@ Expression* Parser::ParseStatement(void)
 
 								if (remain)
 								{
-									finalExp = new Expression(mScanner->mLocation, EX_SEQUENCE);
-									finalExp->mLeft = bodyExp;
-									Expression* bexp = finalExp;
+									finalExp = new Expression(mScanner->mLocation, EX_DO);
+									finalExp->mLeft = new Expression(mScanner->mLocation, EX_CONSTANT);
+									finalExp->mLeft->mDecType = TheBoolTypeDeclaration;
+									finalExp->mLeft->mDecValue = TheFalseConstDeclaration;
+
+									finalExp->mRight = new Expression(mScanner->mLocation, EX_FORBODY);
+									finalExp->mRight->mLeft = bodyExp;
+									Expression* bexp = finalExp->mRight;
 
 									for (int i = 1; i < remain; i++)
 									{
 										bexp->mRight = new Expression(mScanner->mLocation, EX_SEQUENCE);
 										bexp = bexp->mRight;
 										bexp->mLeft = iterateExp;
-										bexp->mRight = new Expression(mScanner->mLocation, EX_SEQUENCE);
+										bexp->mRight = new Expression(mScanner->mLocation, EX_FORBODY);
 										bexp = bexp->mRight;
 										bexp->mLeft = bodyExp;
 									}
@@ -10445,8 +11971,8 @@ Expression* Parser::ParseStatement(void)
 					if (mFunctionType->mBase->mType == DT_TYPE_AUTO || mFunctionType->mBase->IsReference() && mFunctionType->mBase->mBase->mType == DT_TYPE_AUTO)
 					{
 						mFunctionType->mBase = mFunctionType->mBase->DeduceAuto(exp->mLeft->mDecType);
-						;
-						if (mFunctionType->mBase->mType == DT_TYPE_STRUCT)
+
+						if (mFunctionType->mBase->IsComplexStruct())
 						{
 							// Make room for value struct return
 							Declaration* p = mFunctionType->mParams;
@@ -10460,13 +11986,17 @@ Expression* Parser::ParseStatement(void)
 					exp->mLeft = CoerceExpression(exp->mLeft, mFunctionType->mBase);
 				}
 				exp->mLeft = CleanupExpression(exp->mLeft);
-				if (exp->mLeft->mType == EX_CONSTRUCT && mFunctionType && mFunctionType->mBase && mFunctionType->mBase->mType == DT_TYPE_STRUCT)
+				Expression* rexp = exp->mLeft;
+				if (rexp->mType == EX_CLEANUP)
+					rexp = rexp->mLeft;
+
+				if (rexp->mType == EX_CONSTRUCT && mFunctionType && mFunctionType->mBase && mFunctionType->mBase->IsComplexStruct())
 				{
-					Expression* cexp = exp->mLeft->mLeft->mLeft;
+					Expression* cexp = rexp->mLeft->mLeft;
 
-					exp->mLeft->mLeft->mRight = nullptr;
+					rexp->mLeft->mRight = nullptr;
 
-					exp->mLeft->mRight->mType = EX_RESULT;
+					rexp->mRight->mType = EX_RESULT;
 				}
 			}
 			ConsumeToken(TK_SEMICOLON);
@@ -10486,11 +12016,17 @@ Expression* Parser::ParseStatement(void)
 			mScanner->NextToken();
 			break;
 		case TK_ASM:
+		{
 			mScanner->NextToken();
+
+			uint64	aflags = ParseAssemblerFlags();
+
 			if (mScanner->mToken == TK_OPEN_BRACE)
 			{
 				mScanner->NextToken();
 				exp = ParseAssembler();
+				exp->mDecValue->mFlags |= aflags;
+
 				if (mScanner->mToken == TK_CLOSE_BRACE)
 					mScanner->NextToken();
 				else
@@ -10501,12 +12037,20 @@ Expression* Parser::ParseStatement(void)
 				mErrors->Error(mScanner->mLocation, EERR_SYNTAX, "'{' expected");
 				exp = new Expression(mScanner->mLocation, EX_VOID);
 			}
-			break;
+		}	break;
 		case TK_ASSUME:
 			mScanner->NextToken();
 			exp = new Expression(mScanner->mLocation, EX_ASSUME);
 			exp->mLeft = ParseParenthesisExpression();
 			ConsumeToken(TK_SEMICOLON);
+			break;
+		case TK_STATIC_ASSERT:
+			mScanner->NextToken();
+			ParseStaticAssert();
+			break;
+		case TK_TYPEDEF:
+			ParseDeclaration(nullptr, false, false, false);
+			exp = new Expression(mScanner->mLocation, EX_VOID);
 			break;
 		case TK_GOTO:
 #if 1
@@ -10680,10 +12224,10 @@ int Parser::ExpansionDistance(Declaration* tdec, Declaration* spec, Declaration*
 		{
 			if (ptdec->mBase)
 			{
-				if (!xtdec->ResolveTemplate(psdec->mBase, ptdec->mBase))
+				if (!xtdec->ResolveTemplate(psdec->mBase, ptdec->mBase, true, false))
 					return NOOVERLOAD;
 			}
-			else if (!xtdec->ResolveTemplate(psdec->mBase, ptdec))
+			else if (!xtdec->ResolveTemplate(psdec->mBase, ptdec, true, false))
 				return NOOVERLOAD;
 			else
 				cost += 100;
@@ -10707,7 +12251,7 @@ int Parser::ExpansionDistance(Declaration* tdec, Declaration* spec, Declaration*
 			}
 			else if (psdec->mBase)
 			{
-				if (!xtdec->ResolveTemplate(psdec->mBase, ptdec))
+				if (!xtdec->ResolveTemplate(psdec->mBase, ptdec, true, false))
 					return NOOVERLOAD;
 
 				Declaration* dec = psdec->mBase->mParams;
@@ -10727,7 +12271,7 @@ int Parser::ExpansionDistance(Declaration* tdec, Declaration* spec, Declaration*
 			}
 			else if (psdec->mBase)
 			{
-				if (!xtdec->ResolveTemplate(psdec->mBase, ptdec))
+				if (!xtdec->ResolveTemplate(psdec->mBase, ptdec, true, false))
 					return NOOVERLOAD;
 				psdec = psdec->mNext;
 				cost += 200;
@@ -10771,11 +12315,17 @@ void Parser::ParseTemplateArguments(Declaration* tmpld, Declaration* tdec)
 {
 	ConsumeToken(TK_LESS_THAN);
 
-	Declaration* tparm = tmpld->mParams;
 	Declaration* ppdec = nullptr;
 
 	if (!ConsumeTokenIf(TK_GREATER_THAN))
 	{
+		Declaration* tparm = tmpld->mParams;
+		while (tmpld->mNext && !tparm)
+		{
+			tmpld = tmpld->mNext;
+			tparm = tmpld->mParams;
+		}
+
 		do
 		{
 			Expression* exp;
@@ -10865,10 +12415,12 @@ Declaration* Parser::ParseTemplateExpansion(Declaration* tmpld, Declaration* exp
 		if (tmpld->mBase->mType == DT_TEMPLATE)
 		{
 			Parser* p = tmpld->mBase->mParser->Clone();
+			p->mParent = this;
 
 			p->mScanner->Replay(tmpld->mBase->mTokens);
 
 			tdec = tmpld->mBase->Clone();
+			tdec->mScope = tdec->mScope->Clone();
 			tdec->mScope->mName = expd->mScope->mName;
 			tdec->mScope->mParent = expd->mScope;
 
@@ -10898,12 +12450,20 @@ Declaration* Parser::ParseTemplateExpansion(Declaration* tmpld, Declaration* exp
 		ParseTemplateArguments(tmpld, tdec);
 	}
 
+	Declaration* tmplpd = tmpld;
 	while (!tmpld->mTokens)
 		tmpld = tmpld->mNext;
 
 	Declaration* epdec = tdec->mParams;
-	while (epdec && epdec->mBase && epdec->mBase->mType != DT_TYPE_TEMPLATE && epdec->mBase->mType != DT_CONST_TEMPLATE && epdec->mBase->mType != DT_PACK_TEMPLATE)
+	while (epdec && 
+		epdec->mBase &&
+		epdec->mBase->mType != DT_TYPE_TEMPLATE &&
+		epdec->mBase->mType != DT_CONST_TEMPLATE &&
+		epdec->mBase->mType != DT_PACK_TEMPLATE &&
+		!(epdec->mBase->mType == DT_TYPE_STRUCT && epdec->mBase->mTemplate))
+	{
 		epdec = epdec->mNext;
+	}
 
 	if (epdec)
 	{
@@ -10916,7 +12476,7 @@ Declaration* Parser::ParseTemplateExpansion(Declaration* tmpld, Declaration* exp
 		tdec->mQualIdent = tmpld->mQualIdent;
 		tdec->mScope->mName = tdec->mIdent;
 		tdec->mNext = tmpld;
-		bdec->mIdent = tdec->MangleIdent();
+		bdec->mIdent = tdec->mIdent->Mangle(tdec->MangleIdent()->mString);
 
 		return bdec;
 	}
@@ -10946,7 +12506,10 @@ Declaration* Parser::ParseTemplateExpansion(Declaration* tmpld, Declaration* exp
 	if (mindist == 0)
 		return etdec->mBase;
 	else if (mindist == NOOVERLOAD)
-		mErrors->Error(tdec->mLocation, EERR_TEMPLATE_PARAMS, "No matching template parameters");
+	{
+		mErrors->Error(FullLocation(tmpld->mLocation), EERR_TEMPLATE_PARAMS, "No matching template parameters", tmpld->mQualIdent);
+		return tdec;
+	}
 	else
 		tmpld = etdec;
 
@@ -10962,6 +12525,18 @@ Declaration* Parser::ParseTemplateExpansion(Declaration* tmpld, Declaration* exp
 			if (!rdec)
 			{
 				rdec = new Declaration(tdec->mLocation, DT_PACK_TYPE);
+			}
+			else if (!dec)
+			{
+				Declaration* packd = new Declaration(tdec->mLocation, DT_PACK_TEMPLATE);
+				packd->mBase = new Declaration(tdec->mLocation, DT_PACK_TYPE);
+				if (ppdec)
+					ppdec->mNext = packd;
+				else
+					tdec->mParams = packd;
+
+				ppdec = nullptr;
+				dec = packd;
 			}
 			else if (dec->mType != DT_PACK_TEMPLATE)
 			{
@@ -10989,6 +12564,11 @@ Declaration* Parser::ParseTemplateExpansion(Declaration* tmpld, Declaration* exp
 
 				dec = packd;
 			}
+		}
+		else
+		{
+			ppdec = dec;
+			dec = dec->mNext;
 		}
 
 		if (rdec)
@@ -11136,9 +12716,11 @@ Declaration* Parser::ParseTemplateExpansion(Declaration* tmpld, Declaration* exp
 #endif
 
 	Parser* p = tmpld->mParser->Clone();
+	p->mParent = this;
 
 	p->mScanner->Replay(tmpld->mTokens);
 
+	tdec->mIdent = tmpld->mIdent;
 	tdec->mScope->mName = tdec->MangleIdent();
 	tdec->mNext = tmpld->mNext;
 	tmpld->mNext = tdec;
@@ -11505,6 +13087,8 @@ void Parser::ParseTemplateDeclarationBody(Declaration * tdec, Declaration * pthi
 						mScanner->NextToken();
 				}
 			}
+
+			mTemplateScope = tdec->mScope->mParent;
 		}			
 		else
 			mErrors->Error(bdec->mLocation, EERR_FUNCTION_TEMPLATE, "Class template expected");
@@ -11541,7 +13125,7 @@ void Parser::ParseTemplateDeclarationBody(Declaration * tdec, Declaration * pthi
 				strcat_s(buffer, adec->mIdent->mString);
 				adec->mQualIdent = Ident::Unique(buffer);
 			}
-			else if (ConsumeToken(TK_BINARY_NOT) && mScanner->mToken == TK_IDENT && mScanner->mTokenIdent == bdec->mTemplate->mIdent)
+			else if (ConsumeTokenIf(TK_BINARY_NOT) && mScanner->mToken == TK_IDENT && mScanner->mTokenIdent == bdec->mTemplate->mIdent)
 			{
 				mScanner->NextToken();
 
@@ -11557,6 +13141,13 @@ void Parser::ParseTemplateDeclarationBody(Declaration * tdec, Declaration * pthi
 				strcat_s(buffer, "::");
 				strcat_s(buffer, adec->mIdent->mString);
 				adec->mQualIdent = Ident::Unique(buffer);
+			}
+			else if (mScanner->mToken == TK_IDENT)
+			{
+				bdec = TheVoidTypeDeclaration;
+				mScanner->NextToken();
+				adec = ParsePostfixDeclaration(false);
+				adec = ReverseDeclaration(adec, bdec);
 			}
 			else
 				mErrors->Error(bdec->mLocation, EERR_FUNCTION_TEMPLATE, "Constructor or destructor expected");
@@ -11575,14 +13166,35 @@ void Parser::ParseTemplateDeclarationBody(Declaration * tdec, Declaration * pthi
 
 				if (ConsumeTokenIf(TK_COLON))
 				{
-					while (mScanner->mToken != TK_OPEN_BRACE)
-						mScanner->NextToken();
+					do {
+						ConsumeToken(TK_IDENT);
+						if (ConsumeTokenIf(TK_OPEN_PARENTHESIS))
+						{
+							while (mScanner->mToken != TK_OPEN_PARENTHESIS)
+								mScanner->NextToken();
+							mScanner->NextToken();
+						}
+						else if (ConsumeTokenIf(TK_OPEN_BRACE))
+						{
+							int	qdepth = 1;
+							while (qdepth)
+							{
+								if (ConsumeTokenIf(TK_OPEN_BRACE))
+									qdepth++;
+								else if (ConsumeTokenIf(TK_CLOSE_BRACE))
+									qdepth--;
+								else
+									mScanner->NextToken();
+							}
+						}
+
+					} while (ConsumeTokenIf(TK_COMMA));
 				}
 
 			}
 			else
 			{
-				adec = ParsePostfixDeclaration();
+				adec = ParsePostfixDeclaration(false);
 				adec = ReverseDeclaration(adec, bdec);
 			}
 		}
@@ -11683,7 +13295,12 @@ void Parser::ParseTemplateDeclarationBody(Declaration * tdec, Declaration * pthi
 				pdec = pdec->mNext;
 			}
 
-			if (pdec && pdec->mTemplate)
+			if (!pdec)
+			{
+				ppdec->mNext = tdec->mBase;
+				tdec->mBase->mNext = nullptr;
+			}
+			else if (pdec->mTemplate)
 			{
 				tdec->mNext = pdec->mTemplate->mNext;
 				pdec->mTemplate->mNext = tdec;
@@ -11763,6 +13380,7 @@ Expression* Parser::ParseAssemblerBaseOperand(Declaration* pcasm, int pcoffset)
 		break;
 
 	case TK_INTEGER:
+	case TK_INTEGERL:
 		dec = new Declaration(mScanner->mLocation, DT_CONST_INTEGER);
 		dec->mInteger = mScanner->mTokenInteger;
 		if (dec->mInteger < 32768)
@@ -11776,6 +13394,7 @@ Expression* Parser::ParseAssemblerBaseOperand(Declaration* pcasm, int pcoffset)
 		mScanner->NextToken();
 		break;
 	case TK_INTEGERU:
+	case TK_INTEGERUL:
 		dec = new Declaration(mScanner->mLocation, DT_CONST_INTEGER);
 		dec->mInteger = mScanner->mTokenInteger;
 		dec->mBase = TheUnsignedIntTypeDeclaration;
@@ -11800,6 +13419,12 @@ Expression* Parser::ParseAssemblerBaseOperand(Declaration* pcasm, int pcoffset)
 		mScanner->NextToken();
 		exp = ParseAssemblerOperand(pcasm, pcoffset);
 		ConsumeToken(TK_CLOSE_BRACKET);
+		break;
+
+	case TK_OPEN_PARENTHESIS:
+		mScanner->NextToken();
+		exp = ParseAssemblerOperand(pcasm, pcoffset);
+		ConsumeToken(TK_CLOSE_PARENTHESIS);
 		break;
 
 	case TK_IDENT:
@@ -12239,6 +13864,13 @@ Expression* Parser::ParseAssembler(Declaration* vdasm)
 	else
 		dasm = vdasm->mBase;
 
+
+	if (!(mCompilerOptions & COPT_OPTIMIZE_ASSEMBLER))
+		vdasm->mFlags |= DTF_VOLATILE;
+
+	if (!(vdasm->mFlags & DTF_VOLATILE))
+		vdasm->mFlags |= DTF_ASM_PRESERVE_A | DTF_ASM_PRESERVE_X | DTF_ASM_PRESERVE_Y;
+
 	DeclarationScope* scope = dasm->mScope;
 	mScope = scope;
 
@@ -12368,7 +14000,7 @@ Expression* Parser::ParseAssembler(Declaration* vdasm)
 							break;
 					}
 				}
-				else if (mScanner->mToken == TK_EOL || mScanner->mToken == TK_CLOSE_BRACE)
+				else if (mScanner->mToken == TK_EOL || mScanner->mToken == TK_CLOSE_BRACE || mScanner->mToken == TK_SEMICOLON || mScanner->mToken == TK_COLON)
 					ilast->mAsmInsMode = ASMIM_IMPLIED;
 				else if (mScanner->mToken == TK_HASH)
 				{
@@ -12461,7 +14093,7 @@ Expression* Parser::ParseAssembler(Declaration* vdasm)
 
 				if (ilast->mLeft && ilast->mLeft->mDecValue)
 				{
-					if ((ilast->mLeft->mDecValue->mType == DT_CONST_INTEGER && ilast->mLeft->mDecValue->mInteger < 256) ||
+					if ((ilast->mLeft->mDecValue->mType == DT_CONST_INTEGER && ilast->mLeft->mDecValue->mInteger >= 0 && ilast->mLeft->mDecValue->mInteger < 256) ||
 						(ilast->mLeft->mDecValue->mType == DT_VARIABLE_REF && !(ilast->mLeft->mDecValue->mBase->mFlags & DTF_GLOBAL)) ||
 						(ilast->mLeft->mDecValue->mType == DT_VARIABLE && !(ilast->mLeft->mDecValue->mFlags & DTF_GLOBAL)) ||
 						(ilast->mLeft->mDecValue->mType == DT_VARIABLE && (ilast->mLeft->mDecValue->mFlags & DTF_ZEROPAGE)) ||
@@ -12476,23 +14108,87 @@ Expression* Parser::ParseAssembler(Declaration* vdasm)
 					}
 				}
 
-				if (mScanner->mToken != TK_EOL && mScanner->mToken != TK_CLOSE_BRACE)
+				offset += AsmInsSize(ilast->mAsmInsType, ilast->mAsmInsMode);
+
+				uint32 flags = AsmInsFlags(ilast->mAsmInsType, ilast->mAsmInsMode);
+				if (ConsumeTokenIf(TK_COLON))
 				{
-					mErrors->Error(mScanner->mLocation, EERR_SYNTAX, "End of line expected");
+					flags &= ~(ASMIFLG_USES_ACCU | ASMIFLG_USES_XREG | ASMIFLG_USES_YREG | ASMIFLG_CHANGES_ACCU | ASMIFLG_CHANGES_XREG | ASMIFLG_CHANGES_YREG);
+
+					if (mScanner->mToken == TK_IDENT)
+					{
+						char* cp = mScanner->mTokenIdent->mString;
+						while (*cp)
+						{
+							switch (*cp)
+							{
+							case 'a':
+							case 'A':
+								flags |= ASMIFLG_USES_ACCU;
+								break;
+							case 'x':
+							case 'X':
+								flags |= ASMIFLG_USES_XREG;
+								break;
+							case 'y':
+							case 'Y':
+								flags |= ASMIFLG_USES_YREG;
+								break;
+							default:
+								mErrors->Error(mScanner->mLocation, EERR_ASM_INVALID_REGISTER, "Invalid register specified", mScanner->mTokenIdent);
+							}
+							cp++;
+						}
+						mScanner->NextToken();
+					}
+					ConsumeToken(TK_ARROW);
+					if (mScanner->mToken == TK_IDENT)
+					{
+						char* cp = mScanner->mTokenIdent->mString;
+						while (*cp)
+						{
+							switch (*cp)
+							{
+							case 'a':
+							case 'A':
+								flags |= ASMIFLG_CHANGES_ACCU;
+								break;
+							case 'x':
+							case 'X':
+								flags |= ASMIFLG_CHANGES_XREG;
+								break;
+							case 'y':
+							case 'Y':
+								flags |= ASMIFLG_CHANGES_YREG;
+								break;
+							default:
+								mErrors->Error(mScanner->mLocation, EERR_ASM_INVALID_REGISTER, "Invalid register specified", mScanner->mTokenIdent);
+							}
+							cp++;
+						}
+						mScanner->NextToken();
+					}
 				}
 
-				while (mScanner->mToken != TK_EOL && mScanner->mToken != TK_EOF && mScanner->mToken != TK_CLOSE_BRACE)
-					mScanner->NextToken();
-
-				offset += AsmInsSize(ilast->mAsmInsType, ilast->mAsmInsMode);
+				if (flags & ASMIFLG_CHANGES_ACCU) 	vdasm->mFlags &= ~DTF_ASM_PRESERVE_A;
+				if (flags & ASMIFLG_CHANGES_XREG) 	vdasm->mFlags &= ~DTF_ASM_PRESERVE_X;
+				if (flags & ASMIFLG_CHANGES_YREG) 	vdasm->mFlags &= ~DTF_ASM_PRESERVE_Y;
 
 				ifinal = ilast;
 
 				ilast->mRight = new Expression(mScanner->mLocation, EX_ASSEMBLER);
 				ilast = ilast->mRight;
+
+				if (mScanner->mToken != TK_EOL && mScanner->mToken != TK_CLOSE_BRACE && mScanner->mToken != TK_SEMICOLON)
+				{
+					mErrors->Error(mScanner->mLocation, EERR_SYNTAX, "End of line expected");
+				}
+
+				while (mScanner->mToken != TK_EOL && mScanner->mToken != TK_EOF && mScanner->mToken != TK_CLOSE_BRACE && mScanner->mToken != TK_SEMICOLON)
+					mScanner->NextToken();
 			}
 		}
-		else if (mScanner->mToken == TK_EOL)
+		else if (mScanner->mToken == TK_EOL || mScanner->mToken == TK_SEMICOLON)
 		{
 			mScanner->NextToken();
 		}
@@ -12500,7 +14196,7 @@ Expression* Parser::ParseAssembler(Declaration* vdasm)
 		{
 			mErrors->Error(mScanner->mLocation, EERR_ASM_INVALID_INSTRUCTION, "Invalid assembler token");
 
-			while (mScanner->mToken != TK_EOL && mScanner->mToken != TK_EOF)
+			while (mScanner->mToken != TK_EOL && mScanner->mToken != TK_CLOSE_BRACE && mScanner->mToken != TK_SEMICOLON && mScanner->mToken != TK_EOF)
 				mScanner->NextToken();
 		 }
 	}
@@ -12628,6 +14324,8 @@ bool Parser::IsTypeToken(void)
 	case TK_AUTO:
 	case TK_STRIPED:
 	case TK_DECLTYPE:
+	case TK_MEMMAP:
+	case TK_TYPENAME:
 		return true;
 	case TK_IDENT:
 	{
@@ -12655,7 +14353,7 @@ bool Parser::IsTypeToken(void)
 		if (!dec)
 			return true;
 
-		if (dec->mType <= DT_TYPE_AUTO)
+		if (dec->mType <= DT_TYPE_AUTO || dec->mType == DT_NAMESPACE)
 			return true;
 
 	
@@ -12686,6 +14384,34 @@ void Parser::ParsePragma(void)
 			{
 				printf("%s\n", mScanner->mTokenString);
 				mScanner->NextToken();
+			}
+			ConsumeToken(TK_CLOSE_PARENTHESIS);
+		}
+		else if (!strcmp(mScanner->mTokenIdent->mString, "warning"))
+		{
+			mScanner->NextToken();
+			ConsumeToken(TK_OPEN_PARENTHESIS);
+			if (ConsumeIdentIf("disable"))
+			{
+				ConsumeToken(TK_COLON);
+				do {
+					if (ExpectToken(TK_INTEGER) && mScanner->mTokenInteger < EERR_GENERIC)
+					{
+						mErrors->mDisabled += int(mScanner->mTokenInteger);
+						mScanner->NextToken();
+					}
+				} while (ConsumeTokenIf(TK_COMMA));
+			}
+			else if (ConsumeToken(TK_DEFAULT))
+			{
+				ConsumeToken(TK_COLON);
+				do {
+					if (ExpectToken(TK_INTEGER) && mScanner->mTokenInteger < EERR_GENERIC)
+					{
+						mErrors->mDisabled -= int(mScanner->mTokenInteger);
+						mScanner->NextToken();
+					}
+				} while (ConsumeTokenIf(TK_COMMA));
 			}
 			ConsumeToken(TK_CLOSE_PARENTHESIS);
 		}
@@ -13329,6 +15055,27 @@ void Parser::ParsePragma(void)
 
 			ConsumeToken(TK_CLOSE_PARENTHESIS);
 		}
+		else if (!strcmp(mScanner->mTokenIdent->mString, "nocross"))
+		{
+			mScanner->NextToken();
+			ConsumeToken(TK_OPEN_PARENTHESIS);
+
+			if (mScanner->mToken == TK_IDENT)
+			{
+				Declaration* dec = mGlobals->Lookup(mScanner->mTokenIdent);
+				if (dec && dec->mType == DT_VARIABLE && (dec->mFlags & DTF_GLOBAL))
+					dec->mFlags |= DTF_NO_PAGE_CROSS;
+				else if (dec && dec->mType == DT_CONST_FUNCTION)
+					dec->mFlags |= DTF_NO_PAGE_CROSS;
+				else
+					mErrors->Error(mScanner->mLocation, EERR_OBJECT_NOT_FOUND, "Variable not found");
+				mScanner->NextToken();
+			}
+			else
+				mErrors->Error(mScanner->mLocation, EERR_PRAGMA_PARAMETER, "Variable name expected");
+
+			ConsumeToken(TK_CLOSE_PARENTHESIS);
+		}
 		else if (!strcmp(mScanner->mTokenIdent->mString, "align"))
 		{
 			mScanner->NextToken();
@@ -13480,7 +15227,7 @@ void Parser::ParsePragma(void)
 					else if (ConsumeIdentIf("pop"))
 					{
 						if (mCompilerOptionSP > 0)
-							mCompilerOptions = mCompilerOptionStack[--mCompilerOptionSP] = mCompilerOptions;
+							mCompilerOptions = mCompilerOptionStack[--mCompilerOptionSP];
 						else
 							mErrors->Error(mScanner->mLocation, ERRR_STACK_OVERFLOW, "Stack underflow");
 					}
@@ -13518,7 +15265,7 @@ void Parser::ParsePragma(void)
 					else if (ConsumeTokenIf(TK_INLINE))
 						mCompilerOptions |= COPT_OPTIMIZE_INLINE;
 					else if (ConsumeIdentIf("autoinline"))
-						mCompilerOptions |= COPT_OPTIMIZE_AUTO_INLINE | COPT_OPTIMIZE_AUTO_INLINE;
+						mCompilerOptions |= COPT_OPTIMIZE_INLINE | COPT_OPTIMIZE_AUTO_INLINE;
 					else if (ConsumeIdentIf("maxinline"))
 						mCompilerOptions |= COPT_OPTIMIZE_INLINE | COPT_OPTIMIZE_AUTO_INLINE | COPT_OPTIMIZE_AUTO_INLINE_ALL;
 					else if (ConsumeIdentIf("constparams"))
@@ -13609,6 +15356,11 @@ void Parser::ParseNamespace(void)
 					mScanner->NextToken();
 					ParseNamespace();
 				}
+				else if (mScanner->mToken == TK_STATIC_ASSERT)
+				{
+					mScanner->NextToken();
+					ParseStaticAssert();
+				}
 				else
 					ParseDeclaration(nullptr, true, false, false);
 			}
@@ -13640,8 +15392,16 @@ void Parser::ParseNamespace(void)
 	}
 	else
 	{
-		// Annonymous namespace
+		// Anonymous namespace
 	}
+}
+
+Location Parser::FullLocation(const Location& loc)
+{
+	if (mParent)
+		return mParent->FullLocation(Location(loc, &mParent->mScanner->mLocation));
+	else
+		return loc;
 }
 
 void Parser::Parse(void)
@@ -13686,6 +15446,8 @@ void Parser::Parse(void)
 					mScope->Insert(ident, vdasm);
 				}
 
+				vdasm->mFlags |= ParseAssemblerFlags();
+
 				if (mScanner->mToken == TK_OPEN_BRACE)
 				{
 					mScanner->NextToken();
@@ -13712,6 +15474,11 @@ void Parser::Parse(void)
 		{
 			mScanner->NextToken();
 			ParseNamespace();
+		}
+		else if (mScanner->mToken == TK_STATIC_ASSERT)
+		{
+			mScanner->NextToken();
+			ParseStaticAssert();
 		}
 		else
 			ParseDeclaration(nullptr, true, false, false);
